@@ -19,18 +19,24 @@ uv run photo_collector.py pack --library "E:\Kids Photos"
 
 **collect** copies every photo and video in the source that the library doesn't hold yet. The
 source is only read: nothing in it is written, moved or deleted, and zips are read in place, never
-extracted into the source.
+extracted into the source. A file or zip member that can't be read (a corrupt member, a locked
+file) is skipped with a warning and listed as `unreadable` in the run's not-copied list. A run
+first removes any `.part` file a stopped run left in an unsealed volume (only collect writes them
+there), so the stray can't fail that volume's pack.
 
 **retire** is a dry run unless given `--delete`. It re-hashes every file in the source (and every
 media member of every zip), re-reads the library copy for each hash rather than trusting the
 manifest, and writes `_metadata/retire/<time>-<source name>.csv` in the library: one row per source file,
 `delete` (verified) or `keep` with the reason (`no library copy`, `skipped type .xyz`, `excluded`,
-`hash mismatch in library copy`, `library copy missing`). A zip is `delete` only when every
+`hash mismatch in library copy`, `library copy missing`, `unreadable (...)`, `unreadable zip`).
+Zip members are read by position, so two members of one name are each checked. A zip is `delete` only when every
 member is media that verified: a member that is excluded, non-media (sidecar `.json`, nested zip,
 anything else) or unverified would be lost with it, so the zip is `keep` and its reason names
 those members (the first 20 of each kind; all of them, one row each, in `...-zip-members.csv`).
 Totals go in `...-summary.txt`. With `--delete` it removes the `delete` rows' files after
-writing the list.
+writing the list, but only a file (or zip) whose size and modified time are still what the scan
+saw: one changed since it was read is kept and printed (run retire again for it). Every delete is
+recorded as it happens in `...-deleted.csv`, so a run that stops part way leaves a true record.
 
 **pack** zips and seals every volume not yet sealed (`photos/`, `videos/`, `live/`, partly filled
 ones included) and writes the upload list. Zips go to `<library> Zips\` beside the library
@@ -48,13 +54,18 @@ would zip.
   volume: a new file for that year opens the next one (`2023-3` after a sealed `2023-2`, even one
   that isn't full).
 - **Upload list**: `_metadata/uploads/<time>-upload.csv` (`kind, path, size, sha256`), what Matt
-  must upload by hand to Google Drive: the zips this run created, plus the `videos/large/` files
-  no earlier run listed (each gets `upload_listed` in the manifest). A run with nothing new
-  writes no list.
+  must upload by hand to Google Drive: every sealed zip no list has carried yet (this run's, and
+  any sealed by a run that stopped before writing its list), plus the `videos/large/` files no
+  earlier run listed. Both get `upload_listed` in the manifest (volumes listed before 007 added
+  it are marked from the existing lists on the next run). A run with nothing new writes no list.
 - **Resumable**: a re-run seals nothing twice and rebuilds only a zip that is missing, the wrong
   size, or failed before (a stray `.part` is discarded). A rebuilt zip is on that run's list
   again. **Keep the zips after uploading**: deleting one makes the next pack rebuild it (same
-  contents, listed again).
+  contents, listed again). A sealed volume whose file count or bytes differ from its seal is
+  not rebuilt: it fails with `sealed volume changed since sealing`.
+- A failure naming files `only in the folder` means something not in the manifest sits in the
+  volume (a file copied by a stopped collect that a later run placed elsewhere, or one put there
+  by hand): look, move it out, and re-run.
 
 **migrate** (`uv run photo_collector.py migrate --library "E:\Kids Photos" [--apply]`) brings a
 library up to the layout below, in two steps, each only if needed:
@@ -63,7 +74,8 @@ library up to the layout below, in two steps, each only if needed:
    refuse a library still in it.
 2. Live Photo clips from `photos/` (where they sat next to their photo) to `live/`, placed as
    collect would place them (year and order from the paired photo), and each photo given its
-   `live_clips`. Collect refuses a library with clips still in `photos/`.
+   `live_clips`. Collect refuses a library with clips still in `photos/`, and this step refuses
+   to move a clip out of a sealed volume.
 
 Both are renames on the library drive, never a copy; files keep their names, the manifest's paths
 are rewritten and the old manifest kept as `_metadata/runs/<time>-migrate[-live]-old-manifest.json`.
@@ -106,10 +118,15 @@ earlier layout.
 - **Date**, the first found: embedded capture date (EXIF `DateTimeOriginal`, then
   `DateTimeDigitized`, for images; for videos Apple's `com.apple.quicktime.creationdate`, else
   the QuickTime/MP4 `mvhd` creation time, which is UTC and is converted to this machine's time
-  zone); a Google JSON sidecar's `photoTakenTime` (`<name>.json`,
-  `<name>.supplemental-metadata.json`, ...); a date in the filename (`IMG_20230514_101112`,
+  zone; EXIF and Apple dates are the camera's wall time, any zone offset ignored); a Google JSON
+  sidecar's `photoTakenTime` in the same folder (`<name>.json`, `<name>.supplemental-metadata.json`
+  or any cut of that suffix, `<stem>.json`; Takeout's second `IMG_1.jpg`, saved as `IMG_1(1).jpg`,
+  owns `IMG_1.jpg(1).json` and `IMG_1.jpg.supplemental-metadata(1).json`, never `IMG_1.jpg.json`;
+  `IMG_1-edited.jpg` shares `IMG_1.jpg`'s; a name Takeout cut short, at 40 characters or more
+  before `.json`, counts only when it fits media of one stem in the folder); a date in the filename (`IMG_20230514_101112`,
   `PXL_...`, `Screenshot_...`, `IMG-20230514-WA0001`, `signal-2023-05-14-...`). A file's modified
-  time is never used.
+  time is never used. Names are compared ignoring case and Unicode form (a Mac's NFD vs NFC),
+  here and for Live Photo pairing and name clashes.
 - **Names**: `YYYY-MM-DD_HHMMSS_<original stem>.<ext>` (extension lower-cased; a date-only
   filename date gives `000000`; undated files keep their original name). On a clash, `_<8 hex of
   hash>` is added.
@@ -150,9 +167,22 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
 - `hashes.json`: hashes by source path, size and modified time (zip members by zip
   modified time and CRC), so a re-run over the same source doesn't re-read it. Collect only;
   retire never uses it. Safe to delete.
-- `retire/`: retire's lists.
+- `retire/`: retire's lists (with `--delete`, also `...-deleted.csv`).
 - `staging/`: zip-only files extracted during a collect, moved into place as it goes; removed at
   the end of the run (a stopped run's leftovers are reused by the next).
+
+## Tests
+
+```sh
+cd photo-collector
+uv run test_photo_collector.py        # 59 tests, a few seconds; scratch in <repo>/out/pytest-photo-collector
+```
+
+Fixtures only: each test builds its own small source, library and zips folder (JPEGs with EXIF via
+Pillow, hand-made MP4 headers, Takeout sidecars, zips with corrupt, cut-off, duplicate, nested and
+excluded members) and stops runs part way to check that the next one completes or refuses. They
+never touch a real library. `PC_MODULE=<path to another photo_collector.py>` runs them against
+another copy (to show a fixture fails before its fix).
 
 ## Quirks of this machine
 
@@ -177,5 +207,11 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
   Collect run `20261109-215820`, made before the exclude covered the zip, added the crops; they
   were removed again (`_metadata/runs/20261109-*-undo-face-labels.txt`).
   `E:\Kids Photos` holds 624 Live Photo clips (2.7 GB) in `live/2022` to `live/2025-2`.
+- **Read-only check, 2026-11-10 12:50am**: 6,938 manifest entries, every one on disk at its size;
+  no file in `photos/`, `videos/`, `live/` outside the manifest, no `.part`, no two paths alike by
+  case or Unicode form; all 38 volumes sealed and agreeing with their zips; all 38 zips found on
+  the first upload list (the next pack marks them listed and lists nothing again). No library date
+  came from a sidecar (exif 4,787, quicktime 1,344, live-photo 624, filename 26, undated 157), so
+  the old sidecar matching gave no wrong dates here.
 - The guard on this machine refuses `Remove-Item` on `D:\Kids Photos`; an abandoned first attempt
   left only `.cache\hashes.json` there, safe to delete by hand.

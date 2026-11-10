@@ -26,7 +26,9 @@ import shutil
 import struct
 import sys
 import time
+import unicodedata
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -60,9 +62,11 @@ class Item:
     stamp: str               # cache validity stamp
     zip: str | None = None
     member: str | None = None
-    kind: str = "other"      # photo | video | sidecar | other
+    index: int | None = None  # position in the zip's member list (names can repeat)
+    kind: str = "other"      # photo | video | sidecar | other | unreadable
     excluded: bool = False
     sha: str | None = None
+    error: str | None = None  # why it could not be read
 
     @property
     def stem(self) -> str:
@@ -124,11 +128,12 @@ def walk_source(root: str, excludes: list[str], read_zips: bool):
             if it.kind == "zip" and read_zips and not it.excluded:
                 try:
                     zf = zipfile.ZipFile(p)
-                except zipfile.BadZipFile as e:
+                except READ_ERRORS as e:
                     log.warning("unreadable zip %s: %s", p, e)
+                    it.error = str(e)
                     continue
                 with zf:
-                    for zi in zf.infolist():
+                    for idx, zi in enumerate(zf.infolist()):
                         if zi.is_dir():
                             continue
                         mdir, mname = os.path.split(zi.filename)
@@ -136,7 +141,8 @@ def walk_source(root: str, excludes: list[str], read_zips: bool):
                         yield Item(src=f"{p}!{zi.filename}", rel=mrel,
                                    folder=f"{p}!{mdir}", name=mname, size=zi.file_size,
                                    stamp=f"{st.st_mtime_ns}:{zi.CRC}", zip=p, member=zi.filename,
-                                   kind=classify(mname), excluded=is_excluded(mrel, excludes))
+                                   index=idx, kind=classify(mname),
+                                   excluded=is_excluded(mrel, excludes))
 
 
 class Opener:
@@ -153,7 +159,9 @@ class Opener:
             self.close()
             self._zf = zipfile.ZipFile(it.zip)
             self._zp = it.zip
-        return self._zf.open(it.member)
+        # by position, not name: a zip can hold two members of one name, and opening by name
+        # would read the last of them twice
+        return self._zf.open(self._zf.infolist()[it.index])
 
     def close(self):
         if self._zf is not None:
@@ -406,6 +414,14 @@ def check_paths(source: str, lib: str):
 # --------------------------------------------------------------------------- collect
 
 SAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# what reading a damaged file or zip member raises (zipfile: bad CRC, truncated data)
+READ_ERRORS = (OSError, zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError,
+               RuntimeError, ValueError)
+
+
+def fold(s: str) -> str:
+    """Comparison key for names: case and Unicode form (NFC vs a Mac's NFD) ignored."""
+    return unicodedata.normalize("NFC", s).lower()
 
 
 def scan_and_hash(source, lib, excludes, read_zips):
@@ -424,8 +440,14 @@ def scan_and_hash(source, lib, excludes, read_zips):
     meter, op, since_save = Meter("hash", sum(i.size for i in need)), Opener(), 0
     try:
         for it in need:
-            with op.open(it) as f:
-                it.sha = hash_stream(f)
+            try:
+                with op.open(it) as f:
+                    it.sha = hash_stream(f)
+            except READ_ERRORS as e:                # a corrupt zip member, a locked file...
+                log.warning("unreadable %s: %s", it.src, e)
+                it.kind, it.error = "unreadable", str(e)
+                op.close()
+                continue
             cache[it.src] = [it.size, it.stamp, it.sha]
             meter.add(it.size)
             since_save += it.size
@@ -458,7 +480,7 @@ class Library:
             self.vols[(stream, m[1])].setdefault(int(m[2] or 1), 0)
 
     def _note(self, rel: str, size: int):
-        self.taken.add(rel.lower())
+        self.taken.add(fold(rel))
         parts = rel.split("/")
         m = len(parts) == 3 and parts[0] in STREAMS and VOLUME.fullmatch(parts[1])
         if m:
@@ -480,7 +502,7 @@ class Library:
         """Returns (relative path, adopt). adopt: the file is already there with these bytes
         (copied by a run that stopped before saving the manifest)."""
         for rel in (f"{folder}/{base}{ext}", f"{folder}/{base}_{sha[:8]}{ext}"):
-            if rel.lower() in self.taken:
+            if fold(rel) in self.taken:
                 continue
             p = rel_to_abs(self.lib, rel)
             if not os.path.exists(p):
@@ -511,26 +533,92 @@ def link_live(files: dict, clip_sha: str, photo_sha: str):
 
 
 def find_sidecar_dates(items: list[Item]):
-    """folder -> {json name lower: item} for sidecar lookups."""
-    by_folder = defaultdict(dict)
+    """folder -> ({folded json name: item}, [folded media names]) for sidecar lookups."""
+    by_folder = defaultdict(lambda: ({}, []))
     for it in items:
-        if it.kind == "sidecar" and not it.excluded:
-            by_folder[it.folder][it.name.lower()] = it
+        if it.excluded:
+            continue
+        if it.kind == "sidecar":
+            by_folder[it.folder][0][fold(it.name)] = it
+        elif it.kind in ("photo", "video"):
+            by_folder[it.folder][1].append(fold(it.name))
     return by_folder
 
 
+DUP_N = re.compile(r"(.*)(\(\d+\))")
+SIDECAR_TRUNC_MIN = 40      # Takeout cuts a sidecar's name to 46-51 characters with ".json"
+
+
+def _sidecar_keys(name: str) -> list[tuple[str, str]]:
+    """(original name, duplicate tag) pairs a media name may be filed under in Takeout.
+    IMG_1(1).jpg is Takeout's second IMG_1.jpg: its sidecar is IMG_1.jpg(1).json (or
+    IMG_1.jpg.supplemental-metadata(1).json). IMG_1-edited.jpg shares IMG_1.jpg's sidecar."""
+    stem, ext = os.path.splitext(name)
+    keys = []
+    m = DUP_N.fullmatch(stem)
+    if m:
+        keys.append((m[1] + ext, m[2]))
+    keys.append((name, ""))
+    for o, d in list(keys):
+        s, e = os.path.splitext(o)
+        if s.endswith("-edited"):
+            keys.append((s[:-7] + e, d))
+    return keys
+
+
+def _sidecar_match(b: str, orig: str) -> int | None:
+    """How well a sidecar base (name less .json and its (N)) fits a media name: 0 the whole
+    name, with or without (part of) .supplemental-metadata; 1 the name without extension;
+    2 the name cut short (Takeout's length limit); None no match."""
+    if b == orig or (b.startswith(orig + ".") and (orig + ".supplemental-metadata").startswith(b)):
+        return 0
+    if b == os.path.splitext(orig)[0]:
+        return 1
+    if len(b) >= SIDECAR_TRUNC_MIN and orig.startswith(b):
+        return 2
+    return None
+
+
 def sidecar_for(it: Item, side: dict) -> list[Item]:
-    js = side.get(it.folder)
+    """The Google sidecars that belong to it, best first. A cut-short name counts only if no
+    other media file in the folder could own it."""
+    js, media = side.get(it.folder, ({}, []))
     if not js:
         return []
-    n = it.name.lower()
-    out = [j for name, j in js.items() if name.startswith(n) or (len(n) > 46 and name.startswith(n[:46]))]
-    return sorted(out, key=lambda j: len(j.name))
+    keys = _sidecar_keys(fold(it.name))
+    found = {}
+    for jn, j in js.items():
+        b = jn[:-5]                                 # less ".json"
+        m = DUP_N.fullmatch(b)
+        b, d = (m[1], m[2]) if m else (b, "")
+        for ki, (orig, dup) in enumerate(keys):
+            if dup != d:
+                continue
+            r = _sidecar_match(b, orig)
+            if r == 2:
+                # ambiguous if media of two stems fit the cut name (one stem: a photo and
+                # its Live Photo clip, taken together)
+                owners = {os.path.splitext(o)[0] for n in media for o, dd in _sidecar_keys(n)
+                          if dd == d and o.startswith(b)}
+                if len(owners) > 1:
+                    r = None
+            if r is not None:
+                found[jn] = min(found.get(jn, (9, 9)), (ki, r))
+    return [js[jn] for jn in sorted(found, key=lambda jn: (found[jn], len(jn)))]
 
 
 def read_bytes(it: Item, op: Opener) -> bytes:
     with op.open(it) as f:
         return f.read()
+
+
+def library_part_files(lib: str) -> list[str]:
+    """Collect's partial copies (<name>.part) anywhere under photos/, videos/ and live/."""
+    out = []
+    for stream in STREAMS:
+        for dp, _dns, fns in os.walk(os.path.join(lib, stream)):
+            out += [os.path.join(dp, fn) for fn in fns if fn.lower().endswith(".part")]
+    return out
 
 
 def collect(args):
@@ -543,6 +631,14 @@ def collect(args):
     if any(clips_to_move(L.files)):
         sys.exit(f"{lib} still has Live Photo clips in photos/: run "
                  f"'photo_collector.py migrate --library \"{lib}\" --apply' first")
+    # a copy cut short leaves <dest>.part in a volume; the next run may place that file
+    # elsewhere, so the stray would stay and fail the volume's pack. Only collect writes .part
+    # files in the library, and none in a sealed volume.
+    stale = [p for p in library_part_files(lib) if not any(
+        os.path.normcase(p).startswith(os.path.normcase(rel_to_abs(lib, v)) + os.sep) for v in L.sealed)]
+    for p in stale:
+        os.remove(p)
+        log.info("removed %s (left by a stopped run)", p)
     items = scan_and_hash(source, lib, args.exclude, not args.no_zips)
     side = find_sidecar_dates(items)
 
@@ -553,23 +649,25 @@ def collect(args):
     counts["zip members"] = sum(1 for i in items if i.zip is not None)
     counts["media files"] = len(media)
     skipped = [(i.rel, i.size, "excluded" if i.excluded else
+                f"unreadable ({i.error})" if i.error else
                 ("zip (members read)" if i.kind == "zip" and not args.no_zips else "type " + (i.ext or "(none)")))
                for i in items if i.excluded or i.kind not in ("photo", "video")]
     counts["excluded"] = sum(1 for s in skipped if s[2] == "excluded")
     counts["skipped by type"] = sum(1 for s in skipped if s[2].startswith("type "))
     counts["zips read"] = sum(1 for s in skipped if s[2].startswith("zip "))
+    counts["unreadable (not copied)"] = sum(1 for s in skipped if s[2].startswith("unreadable"))
 
     # Live Photo pairing: a video sharing a stem with a photo in the same folder
     photos_by_folder = defaultdict(dict)
     for it in media:
         if it.kind == "photo" and it.ext in LIVE_PHOTO_EXT:
-            cur = photos_by_folder[it.folder].get(it.stem.lower())
+            cur = photos_by_folder[it.folder].get(fold(it.stem))
             if cur is None or (it.ext in (".heic", ".heif") and cur.ext not in (".heic", ".heif")):
-                photos_by_folder[it.folder][it.stem.lower()] = it
+                photos_by_folder[it.folder][fold(it.stem)] = it
     live_of: dict[str, str] = {}          # video sha -> photo sha
     for it in media:
         if it.kind == "video":
-            p = photos_by_folder[it.folder].get(it.stem.lower())
+            p = photos_by_folder[it.folder].get(fold(it.stem))
             if p is not None and it.sha not in live_of:
                 live_of[it.sha] = p.sha
 
@@ -782,10 +880,13 @@ def retire(args):
     def check_library(sha: str) -> str:
         if sha not in lib_ok:
             p = rel_to_abs(lib, files[sha]["path"])
-            if not os.path.exists(p):
+            if not os.path.isfile(p):
                 lib_ok[sha] = "library copy missing"
             else:
-                lib_ok[sha] = "ok" if hash_path(p) == sha else "hash mismatch in library copy"
+                try:
+                    lib_ok[sha] = "ok" if hash_path(p) == sha else "hash mismatch in library copy"
+                except OSError as e:
+                    lib_ok[sha] = f"library copy unreadable ({e})"
         return lib_ok[sha]
 
     rows, member_rows = [], []
@@ -810,10 +911,16 @@ def retire(args):
                     member_rows.append(["keep", "non-media member", it.src, it.size, "", ""])
                     zip_state[it.zip][4].append(("non-media", it.member))
                 continue
-            with op.open(it) as f:
-                sha = hash_stream(f)
+            try:
+                with op.open(it) as f:
+                    sha = hash_stream(f)
+            except READ_ERRORS as e:                     # corrupt member, locked file...
+                op.close()
+                sha, err = "", f"unreadable ({e})"
             meter.add(it.size)
-            if sha not in files:
+            if not sha:
+                action, reason, lp = "keep", err, ""
+            elif sha not in files:
                 action, reason, lp = "keep", "no library copy", ""
             else:
                 lp = files[sha]["path"]
@@ -845,6 +952,8 @@ def retire(args):
             if probs:
                 why += " (" + "; ".join(f"{n} {r}" for r, n in Counter(probs).most_common()) + ")"
             rows.append(["keep", f"zip: members not verified in library: {why}", zp, it.size, "", ""])
+        elif it.error:
+            rows.append(["keep", f"unreadable zip ({it.error})", zp, it.size, "", ""])
         elif tot and ok == tot:
             rows.append(["delete", f"verified zip: all {tot} members in library", zp, it.size, "", ""])
         else:
@@ -877,12 +986,35 @@ def retire(args):
     print(f"list: {base}.csv")
 
     if args.delete:
-        n = 0
-        for r in rows:
-            if r[0] == "delete":
+        # Only what is still exactly as it was read: a file (or zip) whose size or modified time
+        # moved since the scan may hold bytes nobody verified, so it is kept. Each delete is
+        # logged as it happens, so a run that stops part way leaves a true record.
+        stamps = {it.src: (it.size, it.stamp) for it in items if it.zip is None}
+        n, changed = 0, []
+        with open(base + "-deleted.csv", "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["result", "path", "size"])
+            for r in rows:
+                if r[0] != "delete":
+                    continue
+                try:
+                    st = os.stat(r[2])
+                    now = (st.st_size, str(st.st_mtime_ns))
+                except OSError as e:
+                    now = str(e)
+                if now != stamps[r[2]]:
+                    changed.append(r[2])
+                    w.writerow(["kept: changed since it was read", r[2], r[3]])
+                    f.flush()
+                    continue
                 os.remove(r[2])
                 n += 1
-        print(f"deleted {n} files")
+                w.writerow(["deleted", r[2], r[3]])
+                f.flush()
+        for p in changed:
+            print(f"kept (changed since it was read; run retire again): {p}")
+        print(f"deleted {n} files; kept {len(changed)} that changed during the run; "
+              f"record: {base}-deleted.csv")
 
 
 # --------------------------------------------------------------------------- pack
@@ -920,8 +1052,11 @@ def verify_zip(lib: str, vol: str, path: str, want: dict[str, str], files: dict)
     probs = []
     on_disk = {n for n in os.listdir(rel_to_abs(lib, vol)) if os.path.isfile(rel_to_abs(lib, f"{vol}/{n}"))}
     if on_disk != set(want):
-        probs.append(f"folder and manifest differ: {len(on_disk - set(want))} files only in the folder, "
-                     f"{len(set(want) - on_disk)} only in the manifest")
+        extra, gone = sorted(on_disk - set(want)), sorted(set(want) - on_disk)
+        probs.append(f"folder and manifest differ: {len(extra)} files only in the folder"
+                     + (f" ({', '.join(extra[:5])})" if extra else "")
+                     + f", {len(gone)} only in the manifest"
+                     + (f" ({', '.join(gone[:5])})" if gone else ""))
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
@@ -1000,12 +1135,18 @@ def pack(args):
         if os.path.exists(tmp):
             os.remove(tmp)                              # left by a stopped run
         names = sorted(want, key=str.lower)
-        try:
-            build_zip(lib, vol, names, tmp)
-            probs = verify_zip(lib, vol, tmp, want, files)
-        except (OSError, ValueError, zipfile.LargeZipFile) as e:
-            probs = [f"could not build: {e}"]
         vbytes = sum(files[s]["size"] for s in want.values())
+        old = vrecs.get(vol, {})
+        if old.get("sealed") and (old.get("files"), old.get("bytes")) != (len(want), vbytes):
+            # a sealed volume's zip was uploaded: a rebuild must hold exactly what it held
+            probs = [f"sealed volume changed since sealing: {old.get('files')} files, "
+                     f"{old.get('bytes')} bytes then; {len(want)} files, {vbytes} bytes now"]
+        else:
+            try:
+                build_zip(lib, vol, names, tmp)
+                probs = verify_zip(lib, vol, tmp, want, files)
+            except (OSError, ValueError, zipfile.LargeZipFile) as e:
+                probs = [f"could not build: {e}"]
         meter.add(vbytes)
         if probs:
             if os.path.exists(tmp):
@@ -1020,6 +1161,7 @@ def pack(args):
         rec = vrecs.get(vol, {})
         rec.pop("failure", None)
         rec.pop("last_failure", None)
+        rec.pop("upload_listed", None)                  # a new zip: to be listed (again)
         rec.update(zip=name, zip_size=os.path.getsize(zp), files=len(want), bytes=vbytes,
                    zipped=run_id, sealed=rec.get("sealed") or run_id)
         vrecs[vol] = rec
@@ -1027,7 +1169,13 @@ def pack(args):
         created.append((vol, zp, rec["zip_size"]))
         log.info("%s: %d files, sealed (%s)", vol, len(want), name)
 
-    # upload list: this run's zips, plus large videos not listed by an earlier run
+    # upload list: every sealed zip no list has carried yet (this run's, and any sealed by a run
+    # that stopped before writing its list), plus large videos not listed by an earlier run
+    if note_listed_zips(lib, vrecs) and not args.dry_run:
+        L.save()
+    to_list = [(v, os.path.join(zdir, vrecs[v]["zip"]), vrecs[v]["zip_size"]) for v in sorted(vrecs)
+               if vrecs[v].get("sealed") and not vrecs[v].get("upload_listed") and v in vols
+               and os.path.exists(os.path.join(zdir, vrecs[v]["zip"]))]
     large = sorted((e["path"], sha) for sha, e in files.items()
                    if e["path"].startswith("videos/large/") and not e.get("upload_listed"))
     unsealed = [v for v in sorted(vols) if not vrecs.get(v, {}).get("sealed")]
@@ -1035,12 +1183,15 @@ def pack(args):
           f"failed: {len(failed)}; volumes still unsealed: {len(unsealed)}")
     for v, p in failed:
         print(f"  FAILED {v}: {'; '.join(p[:5])}")
+    left = sum(1 for t in to_list if t[0] not in {c[0] for c in created})
+    if left:
+        print(f"sealed zips never listed (a stopped run): {left}")
     print(f"large videos not yet listed: {len(large)} ({sum(files[s]['size'] for _, s in large) / 1e9:.2f} GB)")
     if args.dry_run:
         print("dry run: nothing zipped, sealed or listed")
         return
-    if not created and not failed and not large:
-        print("nothing to do: every volume sealed with its zip in place, every large video listed")
+    if not to_list and not failed and not large:
+        print("nothing to do: every volume sealed with its zip in place, every zip and large video listed")
         return
     d = meta_path(lib, "uploads")
     os.makedirs(d, exist_ok=True)
@@ -1048,10 +1199,12 @@ def pack(args):
     with open(up, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["kind", "path", "size", "sha256"])
-        for vol, zp, size in created:
+        for vol, zp, size in to_list:
             w.writerow(["zip", zp, size, ""])
         for rel, sha in large:
             w.writerow(["large video", rel_to_abs(lib, rel), files[sha]["size"], sha])
+    for vol, _, _ in to_list:
+        vrecs[vol]["upload_listed"] = run_id
     for _, sha in large:
         files[sha]["upload_listed"] = run_id
     L.save()
@@ -1063,11 +1216,36 @@ def pack(args):
         f.write(f"zips created: {len(created)} ({sum(c[2] for c in created) / 1e9:.2f} GB)\n")
         f.write("".join(f"  {os.path.basename(zp)}: {size / 1e6:.0f} MB\n" for _, zp, size in created))
         f.write(f"large videos listed: {len(large)} ({sum(files[s]['size'] for _, s in large) / 1e9:.2f} GB)\n")
+        f.write(f"zips listed: {len(to_list)} ({left} sealed by an earlier, stopped run)\n")
         f.write(f"upload list: {up}\n")
         f.write(f"failed verification (left unsealed): {len(failed)}\n")
         f.write("".join(f"  {v}: {'; '.join(p[:5])}\n" for v, p in failed))
         f.write(f"unsealed volumes: {', '.join(unsealed) or 'none'}\n")
-    print(f"upload list: {up} ({len(created)} zips, {len(large)} large videos); {secs / 60:.1f} min")
+    print(f"upload list: {up} ({len(to_list)} zips, {len(large)} large videos); {secs / 60:.1f} min")
+
+
+def note_listed_zips(lib: str, vrecs: dict) -> int:
+    """Mark upload_listed on sealed volumes whose zip an upload list already carries (lists
+    written before volumes recorded it, or by a run stopped between the list and the save).
+    Returns how many it marked."""
+    d = meta_path(lib, "uploads")
+    if not os.path.isdir(d):
+        return 0
+    listed: dict[str, str] = {}                      # zip file name -> latest list's run
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith("-upload.csv"):
+            continue
+        with open(os.path.join(d, fn), encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("kind") == "zip":
+                    listed[os.path.basename(row["path"])] = fn[:-len("-upload.csv")]
+    n = 0
+    for rec in vrecs.values():
+        run = listed.get(rec.get("zip", ""))
+        if rec.get("sealed") and not rec.get("upload_listed") and run and run >= rec.get("zipped", ""):
+            rec["upload_listed"] = run
+            n += 1
+    return n
 
 
 # --------------------------------------------------------------------------- migrate
@@ -1131,8 +1309,10 @@ def migrate_live(lib: str, apply: bool):
         name = old.rsplit("/", 1)[1]
         year = volume_year(files[e["live_photo_of"]]["path"])
         new = f"{L.volume_for('live', year, e['size'])}/{name}"
-        if new.lower() in L.taken:
+        if fold(new) in L.taken:
             problems.append(f"{old}: {new} is taken in the manifest")
+        if old.rsplit("/", 1)[0] in L.sealed:          # its zip would no longer match
+            problems.append(f"{old}: in a sealed volume")
         po, pn = rel_to_abs(lib, old), rel_to_abs(lib, new)
         if os.path.exists(po):
             if os.path.exists(pn):
