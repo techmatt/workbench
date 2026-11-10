@@ -22,11 +22,20 @@ extracted into the source.
 
 **retire** is a dry run unless given `--delete`. It re-hashes every file in the source (and every
 media member of every zip), re-reads the library copy for each hash rather than trusting the
-manifest, and writes `retire/<time>-<source name>.csv` in the library: one row per source file,
+manifest, and writes `_metadata/retire/<time>-<source name>.csv` in the library: one row per source file,
 `delete` (verified) or `keep` with the reason (`no library copy`, `skipped type .xyz`, `excluded`,
 `hash mismatch in library copy`, `library copy missing`). A zip is `delete` only when all its
 media members verified; the per-member detail goes in `...-zip-members.csv`, and totals in
 `...-summary.txt`. With `--delete` it removes the `delete` rows' files after writing the list.
+
+**migrate** (`uv run photo_collector.py migrate --library "E:\Kids Photos" [--apply]`) moves a
+library from the old layout (`photos/<year>/vNN/`, manifest and logs at the base) to the one
+below: renames on the library drive, never a copy, files keep their names, the manifest's paths
+are rewritten and the old manifest kept as `_metadata/runs/<time>-migrate-old-manifest.json`.
+A dry run unless given `--apply`; a stopped `--apply` resumes when re-run. Collect and retire
+refuse a library still in the old layout. `E:\Kids Photos` was migrated on 2026-11-09 (6,568
+files moved, 8 s); paths inside the `runs/` and `retire/` records written before then are in the
+old layout.
 
 ## Settings
 
@@ -38,7 +47,7 @@ media members verified; the per-member detail goes in `...-zip-members.csv`, and
 | `--volume-mb` | 2000 | Volume fill limit, MB (10^6 bytes). Must stay under 2147 (2 GiB) so a volume's zip never needs Zip64. |
 | `--large-video-mb` | 100 | Videos above this skip the volumes and go to `videos/large/`. |
 | `--live-max-seconds` | 4 | A same-stem video longer than this is not a Live Photo (see below). |
-| `--reserve-gb` | 5 | Free space to leave on the library drive. If the new files don't all fit, collect copies oldest first (undated last) until only this much is left, lists the rest in `runs/<time>-left-out.csv`, and a later run picks them up. |
+| `--reserve-gb` | 5 | Free space to leave on the library drive. If the new files don't all fit, collect copies oldest first (undated last) until only this much is left, lists the rest in `_metadata/runs/<time>-left-out.csv`, and a later run picks them up. |
 | `--no-zips` | off | Treat `.zip` files as a skipped type instead of reading their media members. |
 | `--delete` (retire) | off | Actually delete verified source files. |
 
@@ -46,12 +55,16 @@ media members verified; the per-member detail goes in `...-zip-members.csv`, and
 
 - **Identity is exact bytes** (SHA-256). A file whose hash is in the library is a duplicate: it
   isn't copied, but its source path is added to the manifest.
-- **Layout**: `photos/<year>/vNN/`, `videos/<year>/vNN/`, `videos/large/<year>/`; undated files use
-  `undated` in place of the year. Volumes fill to `--volume-mb` and are numbered per year; files
-  go in date order, so a first run gives chronological volumes, and a later run fills the
-  highest-numbered volume of a year before opening the next. Volumes only ever hold files of at
-  most `--large-video-mb`, so none overshoots its limit by more than that. Nothing is sealed or
-  zipped yet; every volume stays open.
+- **Layout**: the library's base holds only `photos/`, `videos/` and `_metadata/` (see Files in
+  the library). A year's first volume is the year folder itself (`photos/2023/`); further volumes
+  are siblings, `photos/2023-2/`, `photos/2023-3/`, and the same for `videos/`. Undated files use
+  `undated` (`undated-2`, ...) in place of the year. Videos over `--large-video-mb` go in
+  `videos/large/<year>/` instead, outside the volumes. A volume folder is never renamed once
+  made, so a sealed volume (zipped and uploaded later) never changes when the next one opens.
+  Volumes fill to `--volume-mb`; files go in date order, so a first run gives chronological
+  volumes, and a later run fills a year's highest-numbered volume before opening the next. Volumes
+  only ever hold files of at most `--large-video-mb`, so none overshoots its limit by more than
+  that. Nothing is sealed or zipped yet; every volume stays open.
 - **Date**, the first found: embedded capture date (EXIF `DateTimeOriginal`, then
   `DateTimeDigitized`, for images; for videos Apple's `com.apple.quicktime.creationdate`, else
   the QuickTime/MP4 `mvhd` creation time, which is UTC and is converted to this machine's time
@@ -77,6 +90,8 @@ media members verified; the per-member detail goes in `...-zip-members.csv`, and
 
 ## Files in the library
 
+Everything the tool keeps that isn't a photo or video is in `_metadata/`:
+
 - `manifest.json`: per hash, the library `path`, `size`, `kind` (photo, video, live, large),
   `date`, `date_source` (exif, quicktime, sidecar, filename, live-photo, or null), every source
   path it was seen at (`<zip>!<member>` for zip members), the run that `added` it, and
@@ -84,10 +99,12 @@ media members verified; the per-member detail goes in `...-zip-members.csv`, and
   loses little; a file copied but not yet in the manifest is adopted (same bytes) on the next run.
 - `runs/<time>-collect.txt`: the run's counts; `runs/<time>-collect-not-copied.csv`: every file
   not copied, with why (excluded, type, or a zip whose members were read).
-- `.cache/hashes.json`: hashes by source path, size and modified time (zip members by zip
+- `hashes.json`: hashes by source path, size and modified time (zip members by zip
   modified time and CRC), so a re-run over the same source doesn't re-read it. Collect only;
   retire never uses it. Safe to delete.
 - `retire/`: retire's lists.
+- `staging/`: zip-only files extracted during a collect, moved into place as it goes; removed at
+  the end of the run (a stopped run's leftovers are reused by the next).
 
 ## Quirks of this machine
 

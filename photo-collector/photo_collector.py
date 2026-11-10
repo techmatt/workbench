@@ -34,7 +34,12 @@ VIDEO_EXT = {".mov", ".mp4", ".m4v", ".3gp", ".avi", ".mkv", ".mts", ".m2ts", ".
              ".mpg", ".mpeg", ".webm"}
 LIVE_PHOTO_EXT = {".heic", ".heif", ".jpg", ".jpeg"}
 CHUNK = 8 << 20
+META = "_metadata"              # everything the tool keeps that isn't a photo or video
 MANIFEST = "manifest.json"
+HASH_CACHE = "hashes.json"
+STREAMS = ("photos", "videos")
+# a volume folder: "2023" (first volume), "2023-2", ...; "undated", "undated-2", ...
+VOLUME = re.compile(r"(\d{4}|undated)(?:-([2-9]|[1-9]\d+))?")
 NOW = dt.datetime.now()
 
 log = logging.getLogger("photo-collector")
@@ -346,6 +351,22 @@ def rel_to_abs(lib: str, rel: str) -> str:
     return os.path.join(lib, *rel.split("/"))
 
 
+def meta_path(lib: str, *parts: str) -> str:
+    return os.path.join(lib, META, *parts)
+
+
+def volume_folder(stream: str, year: str, n: int) -> str:
+    """The first volume is the year folder itself; later ones are siblings: 2023, 2023-2, ..."""
+    return f"{stream}/{year}" if n == 1 else f"{stream}/{year}-{n}"
+
+
+def check_layout(lib: str):
+    """Refuse a library still in the old layout (manifest at the base, vNN folders)."""
+    if os.path.exists(os.path.join(lib, MANIFEST)):
+        sys.exit(f"{lib} is in the old layout (manifest.json at its base): run "
+                 f"'photo_collector.py migrate --library \"{lib}\" --apply' first")
+
+
 def load_json(path: str, default):
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -374,7 +395,7 @@ SAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 def scan_and_hash(source, lib, excludes, read_zips):
     items = list(walk_source(source, excludes, read_zips))
-    cache_path = os.path.join(lib, ".cache", "hashes.json")
+    cache_path = meta_path(lib, HASH_CACHE)
     cache = load_json(cache_path, {})
     todo = [it for it in items if it.kind in ("photo", "video") and not it.excluded]
     need = [it for it in todo if not (it.src in cache and cache[it.src][0] == it.size
@@ -405,8 +426,8 @@ def scan_and_hash(source, lib, excludes, read_zips):
 class Library:
     def __init__(self, lib: str, volume_mb: int, large_mb: int):
         self.lib = lib
-        self.path = os.path.join(lib, MANIFEST)
-        self.m = load_json(self.path, {"version": 1, "files": {}})
+        self.path = meta_path(lib, MANIFEST)
+        self.m = load_json(self.path, {"version": 2, "files": {}})
         self.files: dict = self.m["files"]
         self.volume_bytes = volume_mb * 1_000_000
         self.large_bytes = large_mb * 1_000_000
@@ -418,8 +439,9 @@ class Library:
     def _note(self, rel: str, size: int):
         self.taken.add(rel.lower())
         parts = rel.split("/")
-        if len(parts) == 4 and re.fullmatch(r"v\d+", parts[2]):
-            self.vols[(parts[0], parts[1])][int(parts[2][1:])] += size
+        m = len(parts) == 3 and parts[0] in STREAMS and VOLUME.fullmatch(parts[1])
+        if m:
+            self.vols[(parts[0], m[1])][int(m[2] or 1)] += size
 
     def save(self):
         save_json(self.path, self.m)
@@ -430,7 +452,7 @@ class Library:
         if v.get(cur, 0) and v[cur] + size > self.volume_bytes:
             cur += 1
         v.setdefault(cur, 0)
-        return f"{stream}/{year}/v{cur:02d}"
+        return volume_folder(stream, year, cur)
 
     def unique_name(self, folder: str, base: str, ext: str, sha: str) -> tuple[str, bool]:
         """Returns (relative path, adopt). adopt: the file is already there with these bytes
@@ -476,6 +498,7 @@ def read_bytes(it: Item, op: Opener) -> bytes:
 def collect(args):
     source, lib = os.path.abspath(args.source), os.path.abspath(args.library)
     check_paths(source, lib)
+    check_layout(lib)
     os.makedirs(lib, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
     items = scan_and_hash(source, lib, args.exclude, not args.no_zips)
@@ -531,7 +554,7 @@ def collect(args):
         log.warning("not everything fits: copying oldest first until %.0f GB remain free", args.reserve_gb)
 
     # Date every new file (zip-only ones are staged into the library first)
-    staging = os.path.join(lib, ".staging")
+    staging = meta_path(lib, "staging")
     os.makedirs(staging, exist_ok=True)
     op = Opener()
     plan = []
@@ -627,7 +650,7 @@ def collect(args):
             base = f"{prefix[0]}_{prefix[1]}_{stem}" if ph["date"] else stem
             folder = ph["path"].rsplit("/", 1)[0]
             if rep.size > L.large_bytes:
-                pyear = ph["path"].split("/")[1]
+                pyear = VOLUME.fullmatch(ph["path"].split("/")[1])[1]
                 folder = f"videos/large/{pyear}"
             kind = "live"
         else:
@@ -672,8 +695,8 @@ def collect(args):
     shutil.rmtree(staging, ignore_errors=True)
     counts["left out for lack of space"] = len(left_out)
     if left_out:
-        os.makedirs(os.path.join(lib, "runs"), exist_ok=True)
-        with open(os.path.join(lib, "runs", f"{run_id}-left-out.csv"), "w", encoding="utf-8", newline="") as f:
+        os.makedirs(meta_path(lib, "runs"), exist_ok=True)
+        with open(meta_path(lib, "runs", f"{run_id}-left-out.csv"), "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["source", "size", "date"])
             w.writerows(left_out)
@@ -683,7 +706,7 @@ def collect(args):
 
 
 def write_run_log(lib, run_id, what, source, args, counts, skipped):
-    d = os.path.join(lib, "runs")
+    d = meta_path(lib, "runs")
     os.makedirs(d, exist_ok=True)
     base = os.path.join(d, f"{run_id}-{what}")
     with open(base + ".txt", "w", encoding="utf-8") as f:
@@ -703,7 +726,8 @@ def write_run_log(lib, run_id, what, source, args, counts, skipped):
 def retire(args):
     source, lib = os.path.abspath(args.source), os.path.abspath(args.library)
     check_paths(source, lib)
-    man = load_json(os.path.join(lib, MANIFEST), None)
+    check_layout(lib)
+    man = load_json(meta_path(lib, MANIFEST), None)
     if man is None:
         sys.exit(f"no manifest in {lib}")
     files = man["files"]
@@ -770,7 +794,7 @@ def retire(args):
             rows.append(["keep", f"zip: {tot - ok} of {tot} media members not verified ({why})", zp, it.size, "", ""])
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    d = os.path.join(lib, "retire")
+    d = meta_path(lib, "retire")
     os.makedirs(d, exist_ok=True)
     tag = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(source.rstrip("\\/"))).strip("_")
     base = os.path.join(d, f"{run_id}-{tag}")
@@ -804,6 +828,127 @@ def retire(args):
         print(f"deleted {n} files")
 
 
+# --------------------------------------------------------------------------- migrate
+
+OLD_VOLUME_PATH = re.compile(r"(photos|videos)/(\d{4}|undated)/v(\d+)/([^/]+)")
+
+
+def new_volume_path(rel: str) -> str:
+    """Old layout path -> new: photos/2023/v01/x -> photos/2023/x, photos/2023/v02/x -> photos/2023-2/x.
+    Anything else (videos/large/...) is unchanged."""
+    m = OLD_VOLUME_PATH.fullmatch(rel)
+    if not m:
+        return rel
+    stream, year, n, name = m.groups()
+    return f"{volume_folder(stream, year, int(n))}/{name}"
+
+
+def migrate(args):
+    """Old layout (vNN folders; manifest, .cache, runs, retire at the base) -> new layout.
+    Moves only, nothing recopied; resumable: a re-run after a stop finishes the job."""
+    lib = os.path.abspath(args.library)
+    old_man, new_man = os.path.join(lib, MANIFEST), meta_path(lib, MANIFEST)
+    if not os.path.exists(old_man):
+        sys.exit(f"no {MANIFEST} at the base of {lib}: already migrated, or not a library")
+    if os.path.exists(new_man):
+        sys.exit(f"both {old_man} and {new_man} exist: look before migrating")
+    known = {"photos", "videos", MANIFEST, ".cache", "runs", "retire", META}
+    odd = sorted(set(os.listdir(lib)) - known)
+    if odd:
+        sys.exit(f"unexpected entries at the base of {lib} (a .staging left by a stopped run?): {odd}")
+
+    # media moves, planned from the disk
+    moves, empty_dirs, problems = [], [], []
+    for stream in STREAMS:
+        sroot = os.path.join(lib, stream)
+        if not os.path.isdir(sroot):
+            continue
+        for year in sorted(os.listdir(sroot)):
+            ydir = os.path.join(sroot, year)
+            if stream == "videos" and year == "large" or not os.path.isdir(ydir):
+                continue
+            if VOLUME.fullmatch(year) and "-" in year:
+                continue                     # a new-style later volume (resumed run)
+            if not VOLUME.fullmatch(year):
+                problems.append(f"{stream}/{year}: not a year folder")
+                continue
+            for v in sorted(os.listdir(ydir)):
+                vdir = os.path.join(ydir, v)
+                if not os.path.isdir(vdir):
+                    continue                 # a file already moved up out of v01
+                if not re.fullmatch(r"v\d+", v):
+                    problems.append(f"{stream}/{year}/{v}: not a vNN folder")
+                    continue
+                for name in sorted(os.listdir(vdir)):
+                    old = f"{stream}/{year}/{v}/{name}"
+                    if os.path.isdir(rel_to_abs(lib, old)):
+                        problems.append(f"{old}: a folder inside a volume")
+                        continue
+                    new = new_volume_path(old)
+                    if os.path.exists(rel_to_abs(lib, new)):
+                        problems.append(f"{old}: {new} already exists")
+                    moves.append((old, new))
+                empty_dirs.append(vdir)
+    if problems:
+        sys.exit("not migrating:\n  " + "\n  ".join(problems[:50]))
+
+    man = load_json(old_man, None)
+    files = man["files"]
+    remap = {e["path"]: new_volume_path(e["path"]) for e in files.values()}
+    moved_to = dict(moves)
+    in_manifest = sum(1 for o in moves if o[0] in remap)
+    meta_moves = [(os.path.join(lib, ".cache", HASH_CACHE), meta_path(lib, HASH_CACHE)),
+                  (os.path.join(lib, "runs"), meta_path(lib, "runs")),
+                  (os.path.join(lib, "retire"), meta_path(lib, "retire"))]
+    meta_moves = [(a, b) for a, b in meta_moves if os.path.exists(a)]
+    for a, b in meta_moves:
+        if os.path.exists(b):
+            sys.exit(f"{b} already exists")
+    cache_dir = os.path.join(lib, ".cache")
+    if os.path.isdir(cache_dir) and set(os.listdir(cache_dir)) - {HASH_CACHE}:
+        sys.exit(f"{cache_dir} holds more than {HASH_CACHE}: look before migrating")
+    vols = Counter(new.rsplit("/", 1)[0] for _, new in moves)
+    print(f"{len(moves)} media files to move ({in_manifest} in the manifest) into {len(vols)} volume folders")
+    print(f"{len(remap)} manifest entries, {sum(1 for a, b in remap.items() if a != b)} with a new path")
+    not_on_disk = [a for a, b in remap.items() if a not in moved_to
+                   and not os.path.exists(rel_to_abs(lib, b))]     # b == a, or moved by a stopped run
+    if not_on_disk:
+        sys.exit(f"{len(not_on_disk)} manifest paths missing on disk, e.g. {not_on_disk[:3]}")
+    for a, b in meta_moves:
+        print(f"move {os.path.relpath(a, lib)} -> {os.path.relpath(b, lib)}")
+    if not args.apply:
+        print("dry run: nothing moved (add --apply)")
+        return
+
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    os.makedirs(meta_path(lib), exist_ok=True)
+    for a, b in meta_moves:
+        os.replace(a, b)
+    if os.path.isdir(cache_dir):
+        os.rmdir(cache_dir)
+    for old, new in moves:
+        dest = rel_to_abs(lib, new)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(rel_to_abs(lib, old), dest)  # same drive: a rename, never a copy
+    for d in empty_dirs:
+        os.rmdir(d)
+    for sha, e in files.items():
+        e["path"] = remap[e["path"]]
+        p = rel_to_abs(lib, e["path"])
+        if not os.path.exists(p) or os.path.getsize(p) != e["size"]:
+            sys.exit(f"after the moves, {e['path']} is missing or the wrong size; "
+                     f"{old_man} is untouched, so a re-run resumes")
+    man["version"] = 2
+    save_json(new_man, man)
+    os.makedirs(meta_path(lib, "runs"), exist_ok=True)
+    os.replace(old_man, meta_path(lib, "runs", f"{run_id}-migrate-old-manifest.json"))
+    with open(meta_path(lib, "runs", f"{run_id}-migrate.txt"), "w", encoding="utf-8") as f:
+        f.write(f"migrate {lib}: vNN folders -> year folders, metadata -> {META}/\n")
+        f.write(f"media files moved: {len(moves)}\nvolume folders: {len(vols)}\n")
+        f.write(f"manifest entries: {len(files)}\nold manifest kept as {run_id}-migrate-old-manifest.json\n")
+    print(f"migrated: base now holds {sorted(os.listdir(lib))}")
+
+
 # --------------------------------------------------------------------------- main
 
 def main():
@@ -827,11 +972,14 @@ def main():
         else:
             p.add_argument("--delete", action="store_true",
                            help="actually delete the verified files (default: dry run)")
+    p = sub.add_parser("migrate", help="move a library from the old layout (vNN folders) to this one")
+    p.add_argument("--library", required=True)
+    p.add_argument("--apply", action="store_true", help="actually move (default: dry run)")
     args = ap.parse_args()
     if args.cmd == "collect" and not 0 < args.volume_mb < 2147:
         sys.exit("--volume-mb must stay under 2147 (2 GiB) so a volume's zip never needs Zip64")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%I:%M:%S%p")
-    (collect if args.cmd == "collect" else retire)(args)
+    {"collect": collect, "retire": retire, "migrate": migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":
