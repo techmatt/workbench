@@ -6,6 +6,7 @@
 
     uv run photo_collector.py collect <source> --library <dir> [options]
     uv run photo_collector.py retire  <source> --library <dir> [--delete] [options]
+    uv run photo_collector.py migrate --library <dir> [--apply]
 
 Sources are only ever read. See README.md for the layout and settings.
 """
@@ -37,7 +38,8 @@ CHUNK = 8 << 20
 META = "_metadata"              # everything the tool keeps that isn't a photo or video
 MANIFEST = "manifest.json"
 HASH_CACHE = "hashes.json"
-STREAMS = ("photos", "videos")
+STREAMS = ("photos", "videos", "live")   # live: Live Photo clips
+OLD_STREAMS = ("photos", "videos")
 # a volume folder: "2023" (first volume), "2023-2", ...; "undated", "undated-2", ...
 VOLUME = re.compile(r"(\d{4}|undated)(?:-([2-9]|[1-9]\d+))?")
 NOW = dt.datetime.now()
@@ -82,9 +84,20 @@ def classify(name: str) -> str:
 
 
 def is_excluded(rel: str, patterns: list[str]) -> bool:
+    """A pattern matches a path or any folder above it. A zip counts as the folder it was made
+    from (face_labels matches face_labels.zip), and its members as if extracted beside it
+    (a.zip!face_labels/x.jpg is also tried as face_labels/x.jpg)."""
     rel = rel.lower()
-    parts = rel.split("/")
-    prefixes = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    cands = [rel]
+    if "!" in rel:
+        z, member = rel.split("!", 1)
+        zdir = z.rsplit("/", 1)[0] + "/" if "/" in z else ""
+        cands = [z, zdir + member]
+    prefixes = []
+    for c in cands:
+        parts = c.split("/")
+        prefixes += ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    prefixes += [p[:-4] for p in prefixes if p.endswith(".zip")]
     for pat in patterns:
         pat = pat.lower().strip("/").replace("\\", "/")
         if any(fnmatch.fnmatchcase(p, pat) for p in prefixes):
@@ -118,10 +131,11 @@ def walk_source(root: str, excludes: list[str], read_zips: bool):
                         if zi.is_dir():
                             continue
                         mdir, mname = os.path.split(zi.filename)
-                        yield Item(src=f"{p}!{zi.filename}", rel=f"{rel}!{zi.filename}",
+                        mrel = f"{rel}!{zi.filename}"
+                        yield Item(src=f"{p}!{zi.filename}", rel=mrel,
                                    folder=f"{p}!{mdir}", name=mname, size=zi.file_size,
                                    stamp=f"{st.st_mtime_ns}:{zi.CRC}", zip=p, member=zi.filename,
-                                   kind=classify(mname))
+                                   kind=classify(mname), excluded=is_excluded(mrel, excludes))
 
 
 class Opener:
@@ -472,6 +486,22 @@ class Library:
         self._note(rel, entry["size"])
 
 
+def volume_year(rel: str) -> str:
+    """The year (or 'undated') of a library path's volume: photos/2023-2/x -> 2023."""
+    m = VOLUME.fullmatch(rel.split("/")[1])
+    if m is None:                                  # videos/large/<year>/x
+        m = VOLUME.fullmatch(rel.split("/")[2])
+    return m[1]
+
+
+def link_live(files: dict, clip_sha: str, photo_sha: str):
+    """Record a Live Photo pairing both ways: the clip's live_photo_of, the photo's live_clips."""
+    files[clip_sha]["live_photo_of"] = photo_sha
+    clips = files[photo_sha].setdefault("live_clips", [])
+    if clip_sha not in clips:
+        clips.append(clip_sha)
+
+
 def find_sidecar_dates(items: list[Item]):
     """folder -> {json name lower: item} for sidecar lookups."""
     by_folder = defaultdict(dict)
@@ -501,8 +531,11 @@ def collect(args):
     check_layout(lib)
     os.makedirs(lib, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    items = scan_and_hash(source, lib, args.exclude, not args.no_zips)
     L = Library(lib, args.volume_mb, args.large_video_mb)
+    if any(clips_to_move(L.files)):
+        sys.exit(f"{lib} still has Live Photo clips in photos/: run "
+                 f"'photo_collector.py migrate --library \"{lib}\" --apply' first")
+    items = scan_and_hash(source, lib, args.exclude, not args.no_zips)
     side = find_sidecar_dates(items)
 
     media = [it for it in items if it.kind in ("photo", "video") and not it.excluded]
@@ -605,7 +638,8 @@ def collect(args):
     finally:
         op.close()
 
-    # Place: chronological, Live Photo videos straight after their photo
+    # Place: chronological, Live Photo clips straight after their photo (so live/ volumes fill
+    # in the photos' date order)
     by_sha = {p["sha"]: p for p in plan}
     live_videos = defaultdict(list)
     for p in plan:
@@ -624,8 +658,8 @@ def collect(args):
         order.append(p)
         lv = live_videos.get(p["sha"], [])
         order.extend(lv)
-        # the photo's volume must also hold its Live Photo videos
-        p["reserve"] = sum(v["rep"].size for v in lv if v["rep"].size <= L.large_bytes)
+        # space on the drive: a photo is copied only if its clips fit too
+        p["reserve"] = sum(v["rep"].size for v in lv)
 
     meter = Meter("copy", need)
     added = 0
@@ -648,10 +682,11 @@ def collect(args):
             date_s = ph["date"]
             prefix = ph["path"].rsplit("/", 1)[1].split("_", 2)
             base = f"{prefix[0]}_{prefix[1]}_{stem}" if ph["date"] else stem
-            folder = ph["path"].rsplit("/", 1)[0]
+            pyear = volume_year(ph["path"])
             if rep.size > L.large_bytes:
-                pyear = VOLUME.fullmatch(ph["path"].split("/")[1])[1]
                 folder = f"videos/large/{pyear}"
+            else:
+                folder = L.volume_for("live", pyear, rep.size)
             kind = "live"
         else:
             date_s = (d.isoformat() if p["has_time"] else d.date().isoformat()) if d else None
@@ -660,7 +695,7 @@ def collect(args):
                 folder, kind = f"videos/large/{year}", "large"
             else:
                 stream = "photos" if rep.kind == "photo" else "videos"
-                folder, kind = L.volume_for(stream, year, rep.size + p.get("reserve", 0)), rep.kind
+                folder, kind = L.volume_for(stream, year, rep.size), rep.kind
         rel, adopt = L.unique_name(folder, base, ext, sha)
         dest = rel_to_abs(lib, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -678,9 +713,9 @@ def collect(args):
             os.replace(dest + ".part", dest)
         entry = dict(path=rel, size=rep.size, kind=kind, date=date_s, date_source=p["date_source"],
                      sources=[i.src for i in p["its"]], added=run_id)
-        if ph_sha is not None:
-            entry["live_photo_of"] = ph_sha
         L.add(rel, sha, entry)
+        if ph_sha is not None:
+            link_live(L.files, sha, ph_sha)
         counts["added"] += 1
         counts[f"added {kind}"] += 1
         counts[f"date from {p['date_source'] or 'none (undated)'}"] += 1
@@ -844,6 +879,106 @@ def new_volume_path(rel: str) -> str:
 
 
 def migrate(args):
+    """Bring a library up to the current layout: first vNN folders -> year folders (if needed),
+    then Live Photo clips photos/ -> live/. Moves only; a dry run unless --apply."""
+    lib = os.path.abspath(args.library)
+    if os.path.exists(os.path.join(lib, MANIFEST)):
+        migrate_old_layout(args)
+        if not args.apply:
+            print("after that, migrate moves Live Photo clips from photos/ to live/ (re-run to see the plan)")
+            return
+    migrate_live(lib, args.apply)
+
+
+def clips_to_move(files: dict):
+    """Live Photo clips still in photos/ (where collects before live/ put them)."""
+    return ((sha, e) for sha, e in files.items() if e["kind"] == "live" and e["path"].startswith("photos/"))
+
+
+def migrate_live(lib: str, apply: bool):
+    """Move Live Photo clips from photos/ to live/<year>[-N]/ (year and order from the paired
+    photo), record each photo's clips, rewrite the manifest. Renames only; resumable."""
+    new_man = meta_path(lib, MANIFEST)
+    if not os.path.exists(new_man):
+        sys.exit(f"no {META}/{MANIFEST} in {lib}: not a library")
+    settings = load_json(new_man, {}).get("settings") or {}
+    L = Library(lib, settings.get("volume_mb", 2000), settings.get("large_video_mb", 100))
+    files = L.files
+    # pairing both ways, for every clip (also any already in live/ or videos/large/)
+    missing = [sha for sha, e in files.items() if e["kind"] == "live" and e.get("live_photo_of") not in files]
+    if missing:
+        sys.exit(f"{len(missing)} Live Photo clips whose photo is not in the manifest, e.g. {missing[:3]}")
+    links = 0
+    for sha, e in files.items():
+        if e["kind"] == "live" and sha not in files[e["live_photo_of"]].get("live_clips", []):
+            link_live(files, sha, e["live_photo_of"])
+            links += 1
+
+    todo = sorted(clips_to_move(files), key=lambda se: (
+        volume_year(files[se[1]["live_photo_of"]]["path"]) == "undated",
+        files[se[1]["live_photo_of"]]["path"].rsplit("/", 1)[1].lower(),   # date-prefixed name
+        se[1]["path"].lower()))
+    moves, problems, done = [], [], 0
+    for sha, e in todo:
+        old = e["path"]
+        name = old.rsplit("/", 1)[1]
+        year = volume_year(files[e["live_photo_of"]]["path"])
+        new = f"{L.volume_for('live', year, e['size'])}/{name}"
+        if new.lower() in L.taken:
+            problems.append(f"{old}: {new} is taken in the manifest")
+        po, pn = rel_to_abs(lib, old), rel_to_abs(lib, new)
+        if os.path.exists(po):
+            if os.path.exists(pn):
+                problems.append(f"{old}: {new} already exists")
+        elif os.path.exists(pn) and os.path.getsize(pn) == e["size"]:
+            done += 1                                   # moved by a stopped run
+        else:
+            problems.append(f"{old}: missing on disk")
+        L._note(new, e["size"])
+        moves.append((sha, old, new))
+    if problems:
+        sys.exit("not migrating:\n  " + "\n  ".join(problems[:50]))
+
+    vols = Counter(new.rsplit("/", 1)[0] for _, _, new in moves)
+    for v, n in sorted(vols.items()):
+        mb = sum(files[s]["size"] for s, _, new in moves if new.rsplit("/", 1)[0] == v) / 1e6
+        print(f"{v}: {n} clips, {mb:.0f} MB")
+    print(f"{len(moves)} Live Photo clips to move from photos/ to live/ ({done} already moved by a stopped run); "
+          f"{links} photos to get their live_clips")
+    if not moves and not links:
+        print("nothing to do")
+        return
+    if not apply:
+        print("dry run: nothing moved (add --apply)")
+        return
+
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    os.makedirs(meta_path(lib, "runs"), exist_ok=True)
+    kept = meta_path(lib, "runs", f"{run_id}-migrate-live-old-manifest.json")
+    shutil.copyfile(new_man, kept)                       # the manifest only; media are renamed
+    t0 = time.time()
+    for sha, old, new in moves:
+        po, pn = rel_to_abs(lib, old), rel_to_abs(lib, new)
+        if os.path.exists(po):
+            os.makedirs(os.path.dirname(pn), exist_ok=True)
+            os.rename(po, pn)                            # same drive: a rename, never a copy
+    for sha, old, new in moves:
+        p = rel_to_abs(lib, new)
+        if not os.path.exists(p) or os.path.getsize(p) != files[sha]["size"]:
+            sys.exit(f"after the moves, {new} is missing or the wrong size; the manifest is "
+                     f"untouched, so a re-run resumes")
+        files[sha]["path"] = new
+    L.save()
+    with open(meta_path(lib, "runs", f"{run_id}-migrate-live.txt"), "w", encoding="utf-8") as f:
+        f.write(f"migrate {lib}: Live Photo clips photos/ -> live/\n")
+        f.write(f"clips moved: {len(moves)} ({done} by an earlier stopped run)\n")
+        f.write("".join(f"  {v}: {n}\n" for v, n in sorted(vols.items())))
+        f.write(f"photos given live_clips: {links}\n")
+        f.write(f"old manifest kept as {os.path.basename(kept)}\n")
+    print(f"migrated in {time.time() - t0:.1f} s: {len(moves)} clips now in live/")
+
+
+def migrate_old_layout(args):
     """Old layout (vNN folders; manifest, .cache, runs, retire at the base) -> new layout.
     Moves only, nothing recopied; resumable: a re-run after a stop finishes the job."""
     lib = os.path.abspath(args.library)
@@ -852,14 +987,13 @@ def migrate(args):
         sys.exit(f"no {MANIFEST} at the base of {lib}: already migrated, or not a library")
     if os.path.exists(new_man):
         sys.exit(f"both {old_man} and {new_man} exist: look before migrating")
-    known = {"photos", "videos", MANIFEST, ".cache", "runs", "retire", META}
-    odd = sorted(set(os.listdir(lib)) - known)
-    if odd:
-        sys.exit(f"unexpected entries at the base of {lib} (a .staging left by a stopped run?): {odd}")
+    # other base entries (face_labels.zip, ...) are left alone; only a stopped run's .staging stops it
+    if os.path.exists(os.path.join(lib, ".staging")):
+        sys.exit(f"{os.path.join(lib, '.staging')} exists (left by a stopped collect?): look before migrating")
 
     # media moves, planned from the disk
     moves, empty_dirs, problems = [], [], []
-    for stream in STREAMS:
+    for stream in OLD_STREAMS:
         sroot = os.path.join(lib, stream)
         if not os.path.isdir(sroot):
             continue
@@ -972,7 +1106,8 @@ def main():
         else:
             p.add_argument("--delete", action="store_true",
                            help="actually delete the verified files (default: dry run)")
-    p = sub.add_parser("migrate", help="move a library from the old layout (vNN folders) to this one")
+    p = sub.add_parser("migrate", help="bring a library to this layout: vNN folders -> year folders, "
+                                       "Live Photo clips photos/ -> live/")
     p.add_argument("--library", required=True)
     p.add_argument("--apply", action="store_true", help="actually move (default: dry run)")
     args = ap.parse_args()

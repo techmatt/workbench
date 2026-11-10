@@ -3,8 +3,8 @@
 Gathers photos and videos of Matt's kids, downloaded from many sources (Google Photos albums
 and the like), into one library that holds a single copy of each file, sorted by year and split
 into photos and videos. Runs are incremental: point it at a new download and it adds only what
-the library lacks. Photos and videos are never committed here; the source and library folders are
-passed in.
+the library lacks. Live Photo clips get a stream of their own. Photos and videos are never committed
+here; the source and library folders are passed in.
 
 ## How to run
 
@@ -28,14 +28,21 @@ manifest, and writes `_metadata/retire/<time>-<source name>.csv` in the library:
 media members verified; the per-member detail goes in `...-zip-members.csv`, and totals in
 `...-summary.txt`. With `--delete` it removes the `delete` rows' files after writing the list.
 
-**migrate** (`uv run photo_collector.py migrate --library "E:\Kids Photos" [--apply]`) moves a
-library from the old layout (`photos/<year>/vNN/`, manifest and logs at the base) to the one
-below: renames on the library drive, never a copy, files keep their names, the manifest's paths
-are rewritten and the old manifest kept as `_metadata/runs/<time>-migrate-old-manifest.json`.
-A dry run unless given `--apply`; a stopped `--apply` resumes when re-run. Collect and retire
-refuse a library still in the old layout. `E:\Kids Photos` was migrated on 2026-11-09 (6,568
-files moved, 8 s); paths inside the `runs/` and `retire/` records written before then are in the
-old layout.
+**migrate** (`uv run photo_collector.py migrate --library "E:\Kids Photos" [--apply]`) brings a
+library up to the layout below, in two steps, each only if needed:
+
+1. From the old layout (`photos/<year>/vNN/`, manifest and logs at the base). Collect and retire
+   refuse a library still in it.
+2. Live Photo clips from `photos/` (where they sat next to their photo) to `live/`, placed as
+   collect would place them (year and order from the paired photo), and each photo given its
+   `live_clips`. Collect refuses a library with clips still in `photos/`.
+
+Both are renames on the library drive, never a copy; files keep their names, the manifest's paths
+are rewritten and the old manifest kept as `_metadata/runs/<time>-migrate[-live]-old-manifest.json`.
+A dry run unless given `--apply`; a stopped `--apply` resumes when re-run. `E:\Kids Photos` had
+step 1 on 2026-11-09 (6,568 files moved, 8 s) and step 2 at 9:57pm the same day (624 clips,
+2.7 GB, 0.9 s); paths inside `runs/` and `retire/` records written before each are in the
+earlier layout.
 
 ## Settings
 
@@ -43,7 +50,7 @@ old layout.
 |---|---|---|
 | `source` | (required) | Folder to collect from (or retire). Read only. |
 | `--library` | (required) | Library root. Must not be inside the source or contain it. |
-| `--exclude GLOB` | none | File or folder, relative to the source, to leave out; repeatable, case-insensitive (`face_labels`, `*/thumbs`). Pass the same excludes to retire. |
+| `--exclude GLOB` | none | File or folder, relative to the source, to leave out; repeatable, case-insensitive (`face_labels`, `*/thumbs`). A zip counts as the folder it was made from (`face_labels` also leaves out `face_labels.zip`), and zip members are also matched as if extracted beside their zip. Pass the same excludes to retire. |
 | `--volume-mb` | 2000 | Volume fill limit, MB (10^6 bytes). Must stay under 2147 (2 GiB) so a volume's zip never needs Zip64. |
 | `--large-video-mb` | 100 | Videos above this skip the volumes and go to `videos/large/`. |
 | `--live-max-seconds` | 4 | A same-stem video longer than this is not a Live Photo (see below). |
@@ -55,9 +62,12 @@ old layout.
 
 - **Identity is exact bytes** (SHA-256). A file whose hash is in the library is a duplicate: it
   isn't copied, but its source path is added to the manifest.
-- **Layout**: the library's base holds only `photos/`, `videos/` and `_metadata/` (see Files in
-  the library). A year's first volume is the year folder itself (`photos/2023/`); further volumes
-  are siblings, `photos/2023-2/`, `photos/2023-3/`, and the same for `videos/`. Undated files use
+- **Layout**: the tool's entries at the library base are `photos/` (stills only), `videos/`,
+  `live/` (Live Photo clips) and `_metadata/` (see Files in the library). Anything else there
+  (Matt keeps `face_labels.zip` at the base of `E:\Kids Photos`) is left alone: collect, retire and
+  migrate never move, read or refuse on it. A year's first volume is the year folder itself
+  (`photos/2023/`); further volumes are siblings, `photos/2023-2/`, `photos/2023-3/`, and the same
+  for `videos/` and `live/`. Undated files use
   `undated` (`undated-2`, ...) in place of the year. Videos over `--large-video-mb` go in
   `videos/large/<year>/` instead, outside the volumes. A volume folder is never renamed once
   made, so a sealed volume (zipped and uploaded later) never changes when the next one opens.
@@ -76,8 +86,12 @@ old layout.
   filename date gives `000000`; undated files keep their original name). On a clash, `_<8 hex of
   hash>` is added.
 - **Live Photos**: a video sharing its stem with a `.heic/.jpg` in the same folder (or the same
-  folder of the same zip), and no longer than `--live-max-seconds`, goes next to that photo,
-  under the photo's date prefix, and the photo's volume keeps room for it. The length test is
+  folder of the same zip), and no longer than `--live-max-seconds`, is that photo's clip. It goes
+  to `live/<year>[-N]/` (2 GB volumes like the other streams; `live/undated` for an undated
+  photo), named with the photo's date prefix; its year is the photo's year, and clips are placed
+  straight after their photo, so `live/` volumes fill in the photos' date order. A clip over
+  `--large-video-mb` (none so far; clips run 1-7 MB) would go to `videos/large/<year>/`. The
+  manifest records the pair both ways (see below). The length test is
   needed because iPhone `IMG_NNNN` numbers repeat: in `D:\Julia Photos` every real Live Photo
   clip ran 0.4-3.5 s, while the 65 same-stem false matches ran 4 s to many minutes and were
   taken weeks or years from the photo. The clip's own timestamp can't decide it: Google's MP4
@@ -94,8 +108,9 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
 
 - `manifest.json`: per hash, the library `path`, `size`, `kind` (photo, video, live, large),
   `date`, `date_source` (exif, quicktime, sidecar, filename, live-photo, or null), every source
-  path it was seen at (`<zip>!<member>` for zip members), the run that `added` it, and
-  `live_photo_of` for Live Photo videos. Saved every 100 files and at the end, so a stopped run
+  path it was seen at (`<zip>!<member>` for zip members), the run that `added` it, and the Live
+  Photo pairing both ways, by hash: `live_photo_of` on each clip (its photo), `live_clips` on each
+  photo that has one (a list; so far always one clip). Saved every 100 files and at the end, so a stopped run
   loses little; a file copied but not yet in the manifest is adopted (same bytes) on the next run.
 - `runs/<time>-collect.txt`: the run's counts; `runs/<time>-collect-not-copied.csv`: every file
   not copied, with why (excluded, type, or a zip whose members were read).
@@ -113,6 +128,10 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
   (26 min), staging zip-only files ~45 MB/s (4 min), copying D: to E: ~74 MB/s (38 min); about
   70 minutes in all. A re-run over the same source takes seconds (hash cache). A retire dry run
   over it re-reads source and library (433 GB): 68 minutes.
-- `D:\Julia Photos` needs `--exclude face_labels` (2,328 face crops from a labelling tool).
+- `D:\Julia Photos` needs `--exclude face_labels` (2,328 face crops from a labelling tool, as a
+  folder and, since 2026-11-09, also as `face_labels.zip` beside it; the exclude covers both).
+  Collect run `20261109-215820`, made before the exclude covered the zip, added the crops; they
+  were removed again (`_metadata/runs/20261109-*-undo-face-labels.txt`).
+  `E:\Kids Photos` holds 624 Live Photo clips (2.7 GB) in `live/2022` to `live/2025-2`.
 - The guard on this machine refuses `Remove-Item` on `D:\Kids Photos`; an abandoned first attempt
   left only `.cache\hashes.json` there, safe to delete by hand.
