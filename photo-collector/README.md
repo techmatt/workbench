@@ -127,7 +127,12 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
   `D:\Julia Photos` (265 GB including 97 GB of zips, 168.6 GB unique): hashing ~140 MB/s
   (26 min), staging zip-only files ~45 MB/s (4 min), copying D: to E: ~74 MB/s (38 min); about
   70 minutes in all. A re-run over the same source takes seconds (hash cache). A retire dry run
-  over it re-reads source and library (433 GB): 68 minutes.
+  over it re-reads source and library (433 GB): 68 minutes; the real `--delete` run, 65 minutes
+  (~67 MB/s), the deletes themselves under 10 s.
+- **`D:\Julia Photos` was retired on 2026-11-09** (`_metadata/retire/20261109-231532-Julia_Photos*`):
+  7,516 files deleted (7,498 loose, 167.7 GB; 18 zips, 96.9 GB), every one verified; 23 directories
+  left empty were removed. Only `face_labels/`, `face_labels.zip` (excluded) and `upload.py`
+  (skipped type) remain there.
 - `D:\Julia Photos` needs `--exclude face_labels` (2,328 face crops from a labelling tool, as a
   folder and, since 2026-11-09, also as `face_labels.zip` beside it; the exclude covers both).
   Collect run `20261109-215820`, made before the exclude covered the zip, added the crops; they
