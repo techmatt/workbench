@@ -6,6 +6,7 @@
 
     uv run photo_collector.py collect <source> --library <dir> [options]
     uv run photo_collector.py retire  <source> --library <dir> [--delete] [options]
+    uv run photo_collector.py pack    --library <dir> [--zips <dir>] [--dry-run]
     uv run photo_collector.py migrate --library <dir> [--apply]
 
 Sources are only ever read. See README.md for the layout and settings.
@@ -447,8 +448,14 @@ class Library:
         self.large_bytes = large_mb * 1_000_000
         self.vols: dict[tuple[str, str], dict[int, int]] = defaultdict(lambda: defaultdict(int))
         self.taken: set[str] = set()
+        # sealed volumes (zipped by pack): never added to again
+        self.sealed = {v for v, rec in self.m.get("volumes", {}).items() if rec.get("sealed")}
         for e in self.files.values():
             self._note(e["path"], e["size"])
+        for v in self.sealed:                      # a sealed volume counts even if emptied
+            stream, folder = v.split("/")
+            m = VOLUME.fullmatch(folder)
+            self.vols[(stream, m[1])].setdefault(int(m[2] or 1), 0)
 
     def _note(self, rel: str, size: int):
         self.taken.add(rel.lower())
@@ -463,8 +470,9 @@ class Library:
     def volume_for(self, stream: str, year: str, size: int) -> str:
         v = self.vols[(stream, year)]
         cur = max(v) if v else 1
-        if v.get(cur, 0) and v[cur] + size > self.volume_bytes:
-            cur += 1
+        if volume_folder(stream, year, cur) in self.sealed or (
+                v.get(cur, 0) and v[cur] + size > self.volume_bytes):
+            cur += 1                               # sealed or full: open the next volume
         v.setdefault(cur, 0)
         return volume_folder(stream, year, cur)
 
@@ -781,21 +789,26 @@ def retire(args):
         return lib_ok[sha]
 
     rows, member_rows = [], []
+    # zip path -> [item, media ok, media total, problems, members that keep the zip (reason, name)]
     zip_state: dict[str, list] = {}
     try:
         for it in items:
             if it.excluded:
                 if it.zip is None:
                     rows.append(["keep", "excluded", it.src, it.size, "", ""])
+                else:                                    # would be lost with the zip
+                    member_rows.append(["keep", "excluded member", it.src, it.size, "", ""])
+                    zip_state[it.zip][4].append(("excluded", it.member))
                 continue
             if it.kind == "zip":
-                zip_state[it.src] = [it, 0, 0, []]       # item, media ok, media total, problems
+                zip_state[it.src] = [it, 0, 0, [], []]
                 continue
             if it.kind not in ("photo", "video"):
                 if it.zip is None:
                     rows.append(["keep", "skipped type " + (it.ext or "(none)"), it.src, it.size, "", ""])
-                else:
-                    member_rows.append(["ignored", "non-media member", it.src, it.size, "", ""])
+                else:                                    # sidecars, nested zips...: not in the library
+                    member_rows.append(["keep", "non-media member", it.src, it.size, "", ""])
+                    zip_state[it.zip][4].append(("non-media", it.member))
                 continue
             with op.open(it) as f:
                 sha = hash_stream(f)
@@ -817,16 +830,25 @@ def retire(args):
                     z[1] += 1
                 else:
                     z[3].append(reason)
+                    z[4].append((f"unverified: {reason}", it.member))
     finally:
         op.close()
-    for zp, (it, ok, tot, probs) in zip_state.items():
-        if tot and ok == tot:
-            rows.append(["delete", f"verified zip: all {tot} media members in library", zp, it.size, "", ""])
-        elif not tot:
-            rows.append(["keep", "zip with no media members", zp, it.size, "", ""])
+    for zp, (it, ok, tot, probs, keepers) in zip_state.items():
+        if keepers:
+            # a zip is deleted only if every member is verified media: any other member would be
+            # lost with it. The members are listed (all of them in -zip-members.csv).
+            by = defaultdict(list)
+            for r, m in keepers:
+                by[r.split(":")[0]].append(m)
+            why = "; ".join(f"{len(ms)} {r} member{'s' if len(ms) > 1 else ''}: {', '.join(ms[:20])}"
+                            + (f" and {len(ms) - 20} more" if len(ms) > 20 else "") for r, ms in by.items())
+            if probs:
+                why += " (" + "; ".join(f"{n} {r}" for r, n in Counter(probs).most_common()) + ")"
+            rows.append(["keep", f"zip: members not verified in library: {why}", zp, it.size, "", ""])
+        elif tot and ok == tot:
+            rows.append(["delete", f"verified zip: all {tot} members in library", zp, it.size, "", ""])
         else:
-            why = "; ".join(f"{n} {r}" for r, n in Counter(probs).most_common())
-            rows.append(["keep", f"zip: {tot - ok} of {tot} media members not verified ({why})", zp, it.size, "", ""])
+            rows.append(["keep", "zip with no members", zp, it.size, "", ""])
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     d = meta_path(lib, "retire")
@@ -861,6 +883,191 @@ def retire(args):
                 os.remove(r[2])
                 n += 1
         print(f"deleted {n} files")
+
+
+# --------------------------------------------------------------------------- pack
+
+def zips_dir_for(lib: str) -> str:
+    """E:\\Kids Photos -> E:\\Kids Photos Zips: a sibling of the library, never inside it."""
+    return os.path.abspath(lib).rstrip("\\/") + " Zips"
+
+
+def zip_name(vol: str) -> str:
+    """photos/2023-2 -> photos-2023-2.zip"""
+    return vol.replace("/", "-") + ".zip"
+
+
+def library_volumes(files: dict) -> dict[str, dict[str, str]]:
+    """volume ('photos/2023') -> {file name: sha}, from the manifest."""
+    vols: dict[str, dict[str, str]] = defaultdict(dict)
+    for sha, e in files.items():
+        parts = e["path"].split("/")
+        if len(parts) == 3 and parts[0] in STREAMS and VOLUME.fullmatch(parts[1]):
+            vols[f"{parts[0]}/{parts[1]}"][parts[2]] = sha
+    return vols
+
+
+def build_zip(lib: str, vol: str, names: list[str], dest: str):
+    """Store-mode zip of the volume folder's files, paths relative to the folder."""
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+        for n in names:
+            zf.write(rel_to_abs(lib, f"{vol}/{n}"), arcname=n)
+
+
+def verify_zip(lib: str, vol: str, path: str, want: dict[str, str], files: dict) -> list[str]:
+    """Read the zip back in full. Problems found (empty: verified): member list equal to the
+    folder's files and to the manifest, every member's CRC, size and SHA-256 as the manifest has."""
+    probs = []
+    on_disk = {n for n in os.listdir(rel_to_abs(lib, vol)) if os.path.isfile(rel_to_abs(lib, f"{vol}/{n}"))}
+    if on_disk != set(want):
+        probs.append(f"folder and manifest differ: {len(on_disk - set(want))} files only in the folder, "
+                     f"{len(set(want) - on_disk)} only in the manifest")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            names = [zi.filename for zi in infos]
+            if len(names) != len(set(names)):
+                probs.append("duplicate member names")
+            if set(names) != on_disk:
+                probs.append(f"members differ from the folder: {len(set(names) - on_disk)} extra, "
+                             f"{len(on_disk - set(names))} missing")
+            for zi in infos:
+                sha = want.get(zi.filename)
+                try:
+                    with zf.open(zi) as f:             # zipfile checks the CRC at the end of the read
+                        got = hash_stream(f)
+                except (zipfile.BadZipFile, OSError) as e:
+                    probs.append(f"{zi.filename}: {e}")
+                    continue
+                if sha is None:
+                    continue                           # already reported as extra
+                if zi.file_size != files[sha]["size"]:
+                    probs.append(f"{zi.filename}: size {zi.file_size} != manifest {files[sha]['size']}")
+                if got != sha:
+                    probs.append(f"{zi.filename}: SHA-256 differs from the manifest")
+    except (zipfile.BadZipFile, OSError) as e:
+        probs.append(f"unreadable zip: {e}")
+    return probs
+
+
+def pack(args):
+    """Zip and seal every volume; write the upload list. Resumable: a re-run seals nothing twice
+    and rebuilds only missing or failed zips."""
+    lib = os.path.abspath(args.library)
+    check_layout(lib)
+    man_path = meta_path(lib, MANIFEST)
+    if not os.path.exists(man_path):
+        sys.exit(f"no {META}/{MANIFEST} in {lib}: not a library")
+    zdir = os.path.abspath(args.zips) if args.zips else zips_dir_for(lib)
+    check_paths(zdir, lib)
+    L = Library(lib, 2000, 100)                         # sizes unused: pack adds nothing
+    files, man = L.files, L.m
+    if any(clips_to_move(files)):
+        sys.exit(f"{lib} still has Live Photo clips in photos/: run migrate --apply first")
+    vrecs: dict = man.setdefault("volumes", {})
+    vols = library_volumes(files)
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    t0 = time.time()
+
+    todo = []
+    for vol in sorted(vols):
+        rec = vrecs.get(vol, {})
+        zp = os.path.join(zdir, zip_name(vol))
+        if rec.get("sealed"):
+            if os.path.exists(zp) and os.path.getsize(zp) == rec.get("zip_size"):
+                continue                                # sealed, zip in place
+            log.info("%s is sealed but its zip is missing or the wrong size: rebuilding", vol)
+        todo.append(vol)
+    total = sum(files[s]["size"] for v in todo for s in vols[v].values())
+    log.info("%d volumes, %d to zip (%.1f GB) into %s", len(vols), len(todo), total / 1e9, zdir)
+    if args.dry_run:
+        for v in todo:
+            print(f"{zip_name(v)}: {len(vols[v])} files, {sum(files[s]['size'] for s in vols[v].values()) / 1e6:.0f} MB")
+    if not args.dry_run and todo:
+        need = total * 1.01 + 2e9
+        free = shutil.disk_usage(os.path.dirname(zdir)).free
+        if need > free:
+            sys.exit(f"not enough space for the zips: {need / 1e9:.1f} GB needed, {free / 1e9:.1f} GB free")
+        os.makedirs(zdir, exist_ok=True)
+
+    created, failed = [], []
+    meter = Meter("pack", total)
+    for vol in [] if args.dry_run else todo:
+        want = vols[vol]
+        name = zip_name(vol)
+        zp = os.path.join(zdir, name)
+        tmp = zp + ".part"
+        if os.path.exists(tmp):
+            os.remove(tmp)                              # left by a stopped run
+        names = sorted(want, key=str.lower)
+        try:
+            build_zip(lib, vol, names, tmp)
+            probs = verify_zip(lib, vol, tmp, want, files)
+        except (OSError, ValueError, zipfile.LargeZipFile) as e:
+            probs = [f"could not build: {e}"]
+        vbytes = sum(files[s]["size"] for s in want.values())
+        meter.add(vbytes)
+        if probs:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            log.warning("%s FAILED verification, left unsealed: %s", vol, "; ".join(probs[:5]))
+            failed.append((vol, probs))
+            rec = vrecs.setdefault(vol, {})
+            rec.update(last_failure=run_id, failure="; ".join(probs[:20]))
+            L.save()
+            continue
+        os.replace(tmp, zp)
+        rec = vrecs.get(vol, {})
+        rec.pop("failure", None)
+        rec.pop("last_failure", None)
+        rec.update(zip=name, zip_size=os.path.getsize(zp), files=len(want), bytes=vbytes,
+                   zipped=run_id, sealed=rec.get("sealed") or run_id)
+        vrecs[vol] = rec
+        L.save()                                        # sealed as soon as its zip is in place
+        created.append((vol, zp, rec["zip_size"]))
+        log.info("%s: %d files, sealed (%s)", vol, len(want), name)
+
+    # upload list: this run's zips, plus large videos not listed by an earlier run
+    large = sorted((e["path"], sha) for sha, e in files.items()
+                   if e["path"].startswith("videos/large/") and not e.get("upload_listed"))
+    unsealed = [v for v in sorted(vols) if not vrecs.get(v, {}).get("sealed")]
+    print(f"zips created: {len(created)} ({sum(c[2] for c in created) / 1e9:.2f} GB); "
+          f"failed: {len(failed)}; volumes still unsealed: {len(unsealed)}")
+    for v, p in failed:
+        print(f"  FAILED {v}: {'; '.join(p[:5])}")
+    print(f"large videos not yet listed: {len(large)} ({sum(files[s]['size'] for _, s in large) / 1e9:.2f} GB)")
+    if args.dry_run:
+        print("dry run: nothing zipped, sealed or listed")
+        return
+    if not created and not failed and not large:
+        print("nothing to do: every volume sealed with its zip in place, every large video listed")
+        return
+    d = meta_path(lib, "uploads")
+    os.makedirs(d, exist_ok=True)
+    up = os.path.join(d, f"{run_id}-upload.csv")
+    with open(up, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["kind", "path", "size", "sha256"])
+        for vol, zp, size in created:
+            w.writerow(["zip", zp, size, ""])
+        for rel, sha in large:
+            w.writerow(["large video", rel_to_abs(lib, rel), files[sha]["size"], sha])
+    for _, sha in large:
+        files[sha]["upload_listed"] = run_id
+    L.save()
+    secs = time.time() - t0
+    os.makedirs(meta_path(lib, "runs"), exist_ok=True)
+    with open(meta_path(lib, "runs", f"{run_id}-pack.txt"), "w", encoding="utf-8") as f:
+        f.write(f"pack {lib} -> {zdir}\n")
+        f.write(f"time: {secs / 60:.1f} min\nvolumes: {len(vols)}\n")
+        f.write(f"zips created: {len(created)} ({sum(c[2] for c in created) / 1e9:.2f} GB)\n")
+        f.write("".join(f"  {os.path.basename(zp)}: {size / 1e6:.0f} MB\n" for _, zp, size in created))
+        f.write(f"large videos listed: {len(large)} ({sum(files[s]['size'] for _, s in large) / 1e9:.2f} GB)\n")
+        f.write(f"upload list: {up}\n")
+        f.write(f"failed verification (left unsealed): {len(failed)}\n")
+        f.write("".join(f"  {v}: {'; '.join(p[:5])}\n" for v, p in failed))
+        f.write(f"unsealed volumes: {', '.join(unsealed) or 'none'}\n")
+    print(f"upload list: {up} ({len(created)} zips, {len(large)} large videos); {secs / 60:.1f} min")
 
 
 # --------------------------------------------------------------------------- migrate
@@ -1106,6 +1313,10 @@ def main():
         else:
             p.add_argument("--delete", action="store_true",
                            help="actually delete the verified files (default: dry run)")
+    p = sub.add_parser("pack", help="zip and seal every volume into <library> Zips; write the upload list")
+    p.add_argument("--library", required=True)
+    p.add_argument("--zips", help="folder for the zips (default: '<library> Zips', beside the library)")
+    p.add_argument("--dry-run", action="store_true", help="show what would be zipped; change nothing")
     p = sub.add_parser("migrate", help="bring a library to this layout: vNN folders -> year folders, "
                                        "Live Photo clips photos/ -> live/")
     p.add_argument("--library", required=True)
@@ -1114,7 +1325,7 @@ def main():
     if args.cmd == "collect" and not 0 < args.volume_mb < 2147:
         sys.exit("--volume-mb must stay under 2147 (2 GiB) so a volume's zip never needs Zip64")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%I:%M:%S%p")
-    {"collect": collect, "retire": retire, "migrate": migrate}[args.cmd](args)
+    {"collect": collect, "retire": retire, "pack": pack, "migrate": migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":
