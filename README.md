@@ -7,4 +7,5 @@ and outputs are paths passed in. The rules for working here are in [CLAUDE.md](C
 
 ## Subfolders
 
-None yet.
+- [photo-collector](photo-collector/README.md): gathers kids' photos and videos from many
+  sources into one collection, removing duplicates and sorting by year and by type.
