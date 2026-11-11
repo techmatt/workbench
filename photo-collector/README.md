@@ -89,7 +89,7 @@ earlier layout.
 | Setting | Default | Meaning |
 |---|---|---|
 | `source` | (required) | Folder to collect from (or retire). Read only. |
-| `--library` | (required) | Library root. Must not be inside the source or contain it. |
+| `--library` | (required) | Library root. Must not be inside the source or contain it, except that a source under `<library>\stage\` is allowed for collect and retire (downloads waiting to be collected, as [gphotos-album](../gphotos-album/README.md) leaves them; the tool never walks or writes `stage\`). |
 | `--exclude GLOB` | none | File or folder, relative to the source, to leave out; repeatable, case-insensitive (`face_labels`, `*/thumbs`). A zip counts as the folder it was made from (`face_labels` also leaves out `face_labels.zip`), and zip members are also matched as if extracted beside their zip. Pass the same excludes to retire. |
 | `--volume-mb` | 2000 | Volume fill limit, MB (10^6 bytes). Must stay under 2147 (2 GiB) so a volume's zip never needs Zip64. |
 | `--large-video-mb` | 100 | Videos above this skip the volumes and go to `videos/large/`. |
@@ -175,7 +175,7 @@ Everything the tool keeps that isn't a photo or video is in `_metadata/`:
 
 ```sh
 cd photo-collector
-uv run test_photo_collector.py        # 59 tests, a few seconds; scratch in <repo>/out/pytest-photo-collector
+uv run test_photo_collector.py        # 60 tests, a few seconds; scratch in <repo>/out/pytest-photo-collector
 ```
 
 Fixtures only: each test builds its own small source, library and zips folder (JPEGs with EXIF via
@@ -213,5 +213,11 @@ another copy (to show a fixture fails before its fix).
   the first upload list (the next pack marks them listed and lists nothing again). No library date
   came from a sidecar (exif 4,787, quicktime 1,344, live-photo 624, filename 26, undated 157), so
   the old sidecar matching gave no wrong dates here.
+- **First collect from a stage, 2026-11-10 9:16pm** (`_metadata/runs/20261110-211636-collect.txt`):
+  13 files from `E:\Kids Photos\stage\julia-and-elizabeth` (gphotos-album's test run) into
+  `photos/2026-2`, `live/2026` and `videos/large/2026` (2026 sealed, so a new volume opened); the
+  library now holds 6,951 entries. It also took in a failure screenshot from the stage's
+  `_gphotos/` as an undated photo, removed again (`_metadata/runs/20261110-*-undo-screenshot.txt`).
+  Collect from a gphotos-album stage with `--exclude _gphotos`.
 - The guard on this machine refuses `Remove-Item` on `D:\Kids Photos`; an abandoned first attempt
   left only `.cache\hashes.json` there, safe to delete by hand.

@@ -407,6 +407,20 @@ def test_name_clash_with_sealed_file_opens_next_volume(w):
     assert "photos-2023-2.zip" in after
 
 
+def test_source_in_library_stage_is_allowed_elsewhere_refused(w):
+    stage = os.path.join(w.lib, "stage", "album", "Someone")
+    jpeg(os.path.join(stage, "IMG_1.jpg"), "2023:01:01 10:00:00", seed="staged")
+    collect(os.path.join(w.lib, "stage", "album"), w.lib)
+    [e] = manifest(w.lib)["files"].values()
+    assert e["path"] == "photos/2023/2023-01-01_100000_IMG_1.jpg"
+    assert os.path.exists(os.path.join(stage, "IMG_1.jpg"))            # source only read
+    collect(os.path.join(w.lib, "stage", "album"), w.lib)              # re-run: nothing new
+    assert len(manifest(w.lib)["files"]) == 1
+    for bad in (os.path.join(w.lib, "photos"), os.path.join(w.lib, "other"), w.lib):
+        with pytest.raises(SystemExit):
+            collect(bad, w.lib)
+
+
 def test_live_clip_of_sealed_photo(w):
     jpeg(os.path.join(w.src, "IMG_5.jpg"), "2023:06:01 10:00:00")
     collect(w.src, w.lib)

@@ -9,3 +9,5 @@ and outputs are paths passed in. The rules for working here are in [CLAUDE.md](C
 
 - [photo-collector](photo-collector/README.md): gathers kids' photos and videos from many
   sources into one collection, removing duplicates and sorting by year and by type.
+- [gphotos-album](gphotos-album/README.md): downloads a Google Photos shared album (every
+  contributor's items, original quality) through the browser, into a stage for photo-collector.

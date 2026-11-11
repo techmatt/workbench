@@ -405,8 +405,15 @@ def save_json(path: str, data):
     os.replace(tmp, path)
 
 
-def check_paths(source: str, lib: str):
+STAGE = "stage"                 # downloads waiting to be collected may sit in <library>/stage/
+
+
+def check_paths(source: str, lib: str, allow_stage: bool = False):
+    """Source and library must not contain each other; with allow_stage, a source inside the
+    library's stage/ folder is allowed (the tool never walks or writes stage/)."""
     s, l = os.path.normcase(os.path.abspath(source)), os.path.normcase(os.path.abspath(lib))
+    if allow_stage and s.startswith(os.path.join(l, STAGE) + os.sep):
+        return
     if s == l or l.startswith(s + os.sep) or s.startswith(l + os.sep):
         sys.exit(f"source and library must not contain each other: {source} / {lib}")
 
@@ -623,7 +630,7 @@ def library_part_files(lib: str) -> list[str]:
 
 def collect(args):
     source, lib = os.path.abspath(args.source), os.path.abspath(args.library)
-    check_paths(source, lib)
+    check_paths(source, lib, allow_stage=True)
     check_layout(lib)
     os.makedirs(lib, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -866,7 +873,7 @@ def write_run_log(lib, run_id, what, source, args, counts, skipped):
 
 def retire(args):
     source, lib = os.path.abspath(args.source), os.path.abspath(args.library)
-    check_paths(source, lib)
+    check_paths(source, lib, allow_stage=True)
     check_layout(lib)
     man = load_json(meta_path(lib, MANIFEST), None)
     if man is None:
