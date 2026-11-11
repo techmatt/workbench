@@ -1,0 +1,15 @@
+status: {'in-library': 1217, 'listed': 1265}
+outcome: {'placed': 1194, 'near-duplicate': 3, 'exact-duplicate': 20, 'listed': 1265}
+chunk items: 630 {'video': 71, 'photo': 536, 'motion-photo': 23}
+chunk outcome: {'placed': 607, 'near-duplicate': 3, 'exact-duplicate': 20}
+chunk clips: {'placed': 23}
+chunk album_index range: 587 1216
+chunk failures/attempts>1: 0
+  ('chunk', 're-encoded', 'removed=album', 'kept=album') 1
+  ('chunk', 're-encoded', 'removed=album', 'kept=other') 2
+  ('chunk', 're-encoded', 'removed=other', 'kept=album') 60
+exact-duplicate first sources: {'Julia Photos': 20}
+removed.csv columns: ['sha256', 'library_path', 'aside_path', 'size', 'class', 'kept_sha256', 'kept_path', 'group']
+removed by extension: {'': 63}
+removed file magic: {'jpeg': 63}
+not-confident rows: 41 columns: ['path_a', 'path_b', 'why not']

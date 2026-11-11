@@ -42,7 +42,9 @@ uv run gphotos_album.py reconcile --stage "%STAGE%" --library "E:\Kids Photos"
   usual pace; a chunk that gets nothing waits `--backoff` 15 min, four in a row end the pass;
   then a retry pass for failed items (up to `--retry-attempts` 6). Writes
   `_gphotos\backfill-done.txt` (counts and what still failed) at the end. Start it detached with
-  output to a log; it takes most of a day for a 2,500-item album.
+  output to a log; it takes most of a day for a 2,500-item album. `--max-items N` makes it a
+  chunk: the main pass stops after N new downloads, and the retry pass covers only items this
+  run tried (the album is being backfilled in ~630-item chunks so a restart costs little).
 - **login** (`--profile DIR`) opens a headed Chrome on a persistent profile to sign in once;
   `list`/`download` with the same `--profile` then run signed in. Not needed so far.
 
@@ -101,6 +103,13 @@ owners by id) and `items` by item id: `owner`, `kind` (photo, video, motion-phot
 - **Measured full-album rate** (backfill, 2026-11-10/11): ~33 s per item mean over the first
   150 (photos 4-7 s, then the 20-30 s pause; 0.7 GB videos ~60 s), so ~23 h for 2,482.
   Collecting from the stage alongside the download is safe (`.part` files are skipped).
+- **Backfill chunks** (`backfill.py --max-items 630`, then collect, reconcile, `dedup.py`
+  scan/plan/apply `--unseal`, no pack). 009 got 587 before a restart killed it.
+  Chunk 1 (2026-11-11, 4:38-10:06am): album items 587-1216, 630 downloaded, 0 failures, 31 s
+  per item. 607 placed, 20 exact duplicates (bytes already in from `D:\Julia Photos`), 3 near
+  duplicates set aside. Dedup removed 63 in all, every one `re-encoded` with the same name, size
+  and capture time (thumbnail difference 0 for 54, at most 0.7): 60 `D:\Julia Photos` copies
+  (named `.HEIC` but JPEG bytes, sizes within 111 KB) in favour of the album's JPEG, 3 of the album's own. Collect plus reconcile plus dedup took about 5 min. Next chunk starts at item 1217.
 - **Full album at the default pause** (estimate from the test run): about 22 hours (2,482 x 25 s mean pause = 17 h, ~5 s
   handling per item = 3.5 h, video transfer 1-2.5 h for an estimated 75-140 GB of video).
   Stage plus library copies need about twice that on E: until the stage is retired

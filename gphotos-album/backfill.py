@@ -34,9 +34,14 @@ def manifest(stage):
         return json.load(f)
 
 
-def todo(stage, max_attempts):
+def todo(stage, max_attempts, only=None):
     return [r for r in manifest(stage)["items"].values()
-            if r["status"] not in DONE and not r.get("removed_from_album") and r["attempts"] < max_attempts]
+            if r["status"] not in DONE and not r.get("removed_from_album") and r["attempts"] < max_attempts
+            and (only is None or r["id"] in only)]
+
+
+def attempts(stage):
+    return {i: r["attempts"] for i, r in manifest(stage)["items"].items()}
 
 
 def n_done(stage):
@@ -58,15 +63,24 @@ def relist(stage):
     log("listing incomplete three times; carrying on with what the manifest has")
 
 
-def pass_(stage, a, max_attempts, label):
+def pass_(stage, a, max_attempts, label, only=None, start=None):
+    """One pass. With --max-items, the main pass stops once this run has downloaded that
+    many (`start`: n_done when the run began); `only` limits a pass to those item ids."""
     idle = 0
-    while todo(stage, max_attempts):
+    while todo(stage, max_attempts, only):
+        limit = a.chunk
+        if a.max_items and start is not None:
+            limit = min(limit, a.max_items - (n_done(stage) - start))
+            if limit <= 0:
+                log(f"{label}: {a.max_items} downloaded this run; stopping (--max-items)")
+                return
         relist(stage)
         before = n_done(stage)
-        run("download", "--stage", stage, "--limit", str(a.chunk), "--pause", str(a.pause),
-            "--jitter", str(a.jitter), "--max-attempts", str(max_attempts))
+        extra = [x for i in sorted(only) for x in ("--only", i)] if only is not None else []
+        run("download", "--stage", stage, "--limit", str(limit), "--pause", str(a.pause),
+            "--jitter", str(a.jitter), "--max-attempts", str(max_attempts), *extra)
         got = n_done(stage) - before
-        left = len(todo(stage, max_attempts))
+        left = len(todo(stage, max_attempts, only))
         log(f"{label}: chunk got {got}; {n_done(stage)} done, {left} still to try")
         if got == 0:
             idle += 1
@@ -89,17 +103,28 @@ def main():
     ap.add_argument("--give-up", type=int, default=4, help="chunks in a row that get nothing before a pass ends")
     ap.add_argument("--retry-attempts", type=int, default=6, help="attempt cap for the retry pass")
     ap.add_argument("--retry-wait", type=float, default=10, help="minutes between the main and retry pass")
+    ap.add_argument("--max-items", type=int, default=0,
+                    help="download at most this many items this run (0: the whole album); the retry "
+                         "pass then covers only items this run tried")
     a = ap.parse_args()
     stage = os.path.abspath(a.stage)
+    start, tried0 = n_done(stage), attempts(stage)
 
-    pass_(stage, a, 3, "main pass")
-    if todo(stage, a.retry_attempts):
-        log(f"retry pass for {len(todo(stage, a.retry_attempts))} items in {a.retry_wait} min")
+    pass_(stage, a, 3, "main pass", start=start)
+    only = None
+    if a.max_items:   # retry only what this run tried and didn't get
+        only = {i for i, n in attempts(stage).items() if n > tried0.get(i, 0)}
+    if todo(stage, a.retry_attempts, only):
+        log(f"retry pass for {len(todo(stage, a.retry_attempts, only))} items in {a.retry_wait} min")
         time.sleep(a.retry_wait * 60)
-        pass_(stage, a, a.retry_attempts, "retry pass")
+        pass_(stage, a, a.retry_attempts, "retry pass", only=only)
     items = manifest(stage)["items"].values()
     left = [r for r in items if r["status"] not in DONE and not r.get("removed_from_album")]
-    lines = [f"finished {time.strftime('%Y-%m-%d %I:%M%p')}: {n_done(stage)} downloaded, {len(left)} not"]
+    lines = [f"finished {time.strftime('%Y-%m-%d %I:%M%p')}: {n_done(stage)} downloaded "
+             f"({n_done(stage) - start} this run), {len(left)} not"]
+    if only is not None:
+        lines[0] += f"; of this run's {len(only)} items tried, still failing:"
+        left = [r for r in left if r["id"] in only]
     lines += [f"  {r['id']}  {r['kind']}  {r['owner']}  attempts {r['attempts']}  {r.get('error')}" for r in left]
     log("\n".join(lines))
     with open(os.path.join(stage, "_gphotos", "backfill-done.txt"), "w", encoding="utf-8") as f:
