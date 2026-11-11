@@ -110,6 +110,15 @@ owners by id) and `items` by item id: `owner`, `kind` (photo, video, motion-phot
   duplicates set aside. Dedup removed 63 in all, every one `re-encoded` with the same name, size
   and capture time (thumbnail difference 0 for 54, at most 0.7): 60 `D:\Julia Photos` copies
   (named `.HEIC` but JPEG bytes, sizes within 111 KB) in favour of the album's JPEG, 3 of the album's own. Collect plus reconcile plus dedup took about 5 min. Next chunk starts at item 1217.
+  Chunk 2 (2026-11-11, 10:12am-3:40pm): album items 1217-1849, `--max-items 633` (half of the
+  1,265 left, rounded up), 0 failures, 31 s per item, 6.5 GB. 167 placed, 408 exact duplicates
+  (372 of them Matthew Fisher's, all first collected from `D:\Julia Photos`; 47 Live clips too),
+  58 near duplicates set aside. Dedup removed 225, all `re-encoded`, same name, size and capture
+  time (difference 0 for 185, at most 0.56): 167 `D:\Julia Photos` copies in favour of the album,
+  58 album stills in favour of the `D:\Julia Photos` copy, 47 of them because that copy carries
+  a Live clip and the album's still doesn't. Post-download steps took about 2 min. Next chunk:
+  item 1850 on, 632 left (`--max-items 632`).
+  Run reconcile *after* `dedup.py apply`, so near duplicates get their outcome.
 - **Full album at the default pause** (estimate from the test run): about 22 hours (2,482 x 25 s mean pause = 17 h, ~5 s
   handling per item = 3.5 h, video transfer 1-2.5 h for an estimated 75-140 GB of video).
   Stage plus library copies need about twice that on E: until the stage is retired

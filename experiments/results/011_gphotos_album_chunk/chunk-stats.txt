@@ -1,0 +1,43 @@
+status: {'in-library': 1850, 'listed': 632}
+outcome: {'placed': 1361, 'near-duplicate': 61, 'exact-duplicate': 428, 'listed': 632}
+chunk items: 633 {'photo': 516, 'video': 70, 'motion-photo': 47}
+chunk outcome: {'placed': 167, 'exact-duplicate': 408, 'near-duplicate': 58}
+chunk clips: {'exact-duplicate': 47}
+chunk album_index range: 1217 1849
+chunk failures/attempts>1: 0
+chunk outcome by owner:
+   ('Daiany Silva', 'exact-duplicate') 7
+   ('Daiany Silva', 'placed') 65
+   ('Jason Collins', 'exact-duplicate') 14
+   ('Jason Collins', 'placed') 2
+   ('Kathleen Langan (Kat)', 'placed') 1
+   ('Matthew Fisher', 'exact-duplicate') 372
+   ('Ronan Beltracchi', 'exact-duplicate') 3
+   ('Ronan Beltracchi', 'placed') 12
+   ('Sayumi Kurohira', 'placed') 27
+   ('Shannon Thomson', 'exact-duplicate') 3
+   ('Shannon Thomson', 'near-duplicate') 7
+   ('Spaz Monkey', 'exact-duplicate') 9
+   ('Spaz Monkey', 'near-duplicate') 51
+   ('Spaz Monkey', 'placed') 60
+chunk seconds mean: 5.8
+chunk GB: 6.51
+removed.csv rows: 225 of which album items of this chunk: 58 kept copy is this chunk's: 167
+groups 225 removals 225
+  ('re-encoded', 'removed=julia', 'kept=album') 167
+  ('re-encoded', 'removed=album', 'kept=julia') 58
+flags {'stem same': 225, 'same size': 225, 'same date': 225}
+removed ext {'heic': 137, 'jpg': 88}
+mad: zero 185 max 0.56 p90 0.35
+exact-duplicate first source: {'D:\\Julia Photos': 408}
+album copy set aside because: {('other', 'jpg', 'heic'): 44, ('exif_tags equal, bytes kept>removed', 'jpg', 'heic'): 4, ('other', 'jpg', 'jpg'): 3, ('exif_tags equal, bytes kept>removed', 'jpg', 'jpg'): 7}
+
+Notes (011, 2026-11-11):
+- Baseline is the stage manifest as 010 left it (1,217 in-library); "chunk" = items done now but not then.
+- Run: backfill.py --max-items 633 (half of 1,265 left, rounded up), 10:12am-3:40pm, 31.1 s per
+  item wall (5.8 s handling mean), 0 failures, no retry pass needed.
+- 'other' above (47 of 58): the kept D:\Julia Photos copy has a Live clip (live_clips set), the album
+  still has none, which ranks first after pixels. The other 11 tie on tags and go by bytes.
+  GPS on both sides of all 58 (51 both with, 7 both without), so GPS was not the decider.
+- Collect: 225 added, 1,739 duplicates (cumulative over the stage), 3 set-aside duplicates seen again.
+- Dedup apply 20261111-154212 unsealed photos/2025-5 (its zip moved to the Duplicates folder).
