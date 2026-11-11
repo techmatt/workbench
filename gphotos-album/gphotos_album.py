@@ -402,36 +402,54 @@ def cmd_reconcile(args):
     """Mark downloaded items found in photo-collector's library manifest (after its collect)."""
     m = load(args.stage)
     with open(os.path.join(args.library, "_metadata", "manifest.json"), encoding="utf-8") as f:
-        lib = json.load(f)["files"]
+        libm = json.load(f)
+    lib, aside = libm["files"], libm.get("set_aside", {})
     stage = os.path.abspath(args.stage)
 
     def find(f: dict):
-        """(library entry, whether this download is what added it) by the file's SHA-256."""
-        e = lib.get(f["sha256"])
+        """(library entry, whether this download is what added it, set aside) by SHA-256.
+        Bytes photo-collector's dedup.py set aside count, with the copy kept in their place."""
+        e, set_aside = lib.get(f["sha256"]), False
+        if not e and f["sha256"] in aside and aside[f["sha256"]].get("kept") in lib:
+            e, set_aside = aside[f["sha256"]], True
         if not e:
-            return None, None
+            return None, None, None
         mine = os.path.normcase(os.path.join(stage, f["path"].replace("/", os.sep)))
         first = os.path.normcase(e["sources"][0]) if e.get("sources") else ""
-        return e, first == mine
+        return e, first == mine, set_aside
 
     n = {"in-library": 0, "not yet collected": 0}
     for r in m["items"].values():
         if r["status"] not in DONE or not r.get("path"):
             continue
-        e, new = find(r)
+        e, new, dup = find(r)
         clip = r.get("clip")
-        ce, cnew = find(clip) if clip else (None, None)
+        ce, cnew, cdup = find(clip) if clip else (None, None, None)
         if not e or (clip and not ce):
             r["status"] = "downloaded"
             n["not yet collected"] += 1
             continue
-        r.update({"status": "in-library", "library_path": e["path"], "library_new": new,
-                  "library_date_source": e.get("date_source")})
+        # outcome: placed (this download added it), exact-duplicate (the library already held
+        # these bytes), near-duplicate (dedup.py set it aside; kept_path is the copy kept)
+        r.update({"status": "in-library", "library_path": e.get("kept_path") if dup else e["path"],
+                  "library_new": new, "library_date_source": e.get("date_source"),
+                  "outcome": "near-duplicate" if dup else "placed" if new else "exact-duplicate"})
+        if dup:
+            r["set_aside_path"] = e.get("aside_path")
         if clip:
-            clip.update({"library_path": ce["path"], "library_new": cnew})
+            clip.update({"library_path": ce.get("kept_path") if cdup else ce["path"], "library_new": cnew,
+                         "outcome": "near-duplicate" if cdup else "placed" if cnew else "exact-duplicate"})
         n["in-library"] += 1
+    for r in m["items"].values():
+        if r["status"] == "failed" or (r["status"] == "listed" and r["attempts"]):
+            r["outcome"] = "failed"
     save(args.stage, m)
     print(", ".join(f"{k} {v}" for k, v in n.items()))
+    oc: dict[str, int] = {}
+    for r in m["items"].values():
+        k = r.get("outcome") or r["status"]
+        oc[k] = oc.get(k, 0) + 1
+    print("outcomes:", ", ".join(f"{k} {v}" for k, v in sorted(oc.items())))
     for r in sorted(m["items"].values(), key=lambda r: r["album_index"]):
         if r["status"] == "in-library":
             for f in (r, r.get("clip")):

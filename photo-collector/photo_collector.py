@@ -678,18 +678,28 @@ def collect(args):
             if p is not None and it.sha not in live_of:
                 live_of[it.sha] = p.sha
 
+    # a clip whose photo dedup.py set aside belongs to the copy that was kept
+    for v, ph in list(live_of.items()):
+        kept = L.m.get("set_aside", {}).get(ph, {}).get("kept")
+        if kept in L.files:
+            live_of[v] = kept
+
     # Group occurrences by hash; record new source paths for known hashes
     occ: dict[str, list[Item]] = defaultdict(list)
     for it in media:
         occ[it.sha].append(it)
+    # bytes dedup.py set aside (a near-duplicate of a file kept) are known too: never re-copied
+    aside = L.m.get("set_aside", {})
     for sha, its in occ.items():
-        if sha in L.files:
-            srcs = L.files[sha]["sources"]
+        known = L.files.get(sha) or aside.get(sha)
+        if known:
+            srcs = known.setdefault("sources", [])
             for it in its:
                 if it.src not in srcs:
                     srcs.append(it.src)
-    new = {sha: its for sha, its in occ.items() if sha not in L.files}
+    new = {sha: its for sha, its in occ.items() if sha not in L.files and sha not in aside}
     counts["duplicates"] = len(media) - len(new)
+    counts["set-aside duplicates seen again"] = sum(len(its) for sha, its in occ.items() if sha in aside)
     need = sum(its[0].size for its in new.values())
     free = shutil.disk_usage(lib).free
     budget = free - args.reserve_gb * 1e9
@@ -896,6 +906,21 @@ def retire(args):
                     lib_ok[sha] = f"library copy unreadable ({e})"
         return lib_ok[sha]
 
+    aside = man.get("set_aside", {})
+
+    def check_aside(sha: str) -> str:
+        key = "aside:" + sha
+        if key not in lib_ok:
+            p = aside[sha].get("aside_path") or ""
+            if not os.path.isfile(p):
+                lib_ok[key] = "set-aside copy missing"
+            else:
+                try:
+                    lib_ok[key] = "ok" if hash_path(p) == sha else "hash mismatch in set-aside copy"
+                except OSError as e:
+                    lib_ok[key] = f"set-aside copy unreadable ({e})"
+        return lib_ok[key]
+
     rows, member_rows = [], []
     # zip path -> [item, media ok, media total, problems, members that keep the zip (reason, name)]
     zip_state: dict[str, list] = {}
@@ -927,6 +952,16 @@ def retire(args):
             meter.add(it.size)
             if not sha:
                 action, reason, lp = "keep", err, ""
+            elif sha not in files and sha in aside:
+                # set aside by dedup.py as a near-duplicate: both the kept library copy and the
+                # set-aside copy (these exact bytes) must verify
+                a = aside[sha]
+                lp = a.get("aside_path", "")
+                r = check_library(a["kept"]) if a.get("kept") in files else "kept copy not in library"
+                if r == "ok":
+                    r = check_aside(sha)
+                action, reason = (("delete", "verified (set-aside duplicate of " + files[a["kept"]]["path"] + ")")
+                                  if r == "ok" else ("keep", r))
             elif sha not in files:
                 action, reason, lp = "keep", "no library copy", ""
             else:

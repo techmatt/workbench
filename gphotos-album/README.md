@@ -33,7 +33,16 @@ uv run gphotos_album.py reconcile --stage "%STAGE%" --library "E:\Kids Photos"
 - **collect** (photo-collector) copies what the library lacks, by exact bytes, dated and named
   by its usual rules. It accepts a source under `<library>\stage\`. Pass `--exclude _gphotos`.
 - **reconcile** marks each downloaded item `in-library` with its library path (by SHA-256),
-  and whether this download added it or the library already had those bytes.
+  and whether this download added it or the library already had those bytes. Each item gets an
+  `outcome`: `placed`, `exact-duplicate` (the library already held the bytes),
+  `near-duplicate` (photo-collector's `dedup.py` set it aside; `library_path` is the copy kept,
+  `set_aside_path` where it went) or `failed`.
+- **backfill** (`uv run backfill.py --stage "%STAGE%"`) runs a whole album unattended: chunks
+  of `--chunk` 150, each a fresh `list` (URLs never go stale) then `download --limit 150` at the
+  usual pace; a chunk that gets nothing waits `--backoff` 15 min, four in a row end the pass;
+  then a retry pass for failed items (up to `--retry-attempts` 6). Writes
+  `_gphotos\backfill-done.txt` (counts and what still failed) at the end. Start it detached with
+  output to a log; it takes most of a day for a 2,500-item album.
 - **login** (`--profile DIR`) opens a headed Chrome on a persistent profile to sign in once;
   `list`/`download` with the same `--profile` then run signed in. Not needed so far.
 
@@ -89,7 +98,10 @@ owners by id) and `items` by item id: `owner`, `kind` (photo, video, motion-phot
   full resolution with EXIF and GPS. Photos took 5-8 s each (page load included), a 30 s 4K
   video (201 MB) 18 s; a probe pulled a 54 s 1080p `.MOV` of 675 MB in 25 s (~27 MB/s).
   No throttling seen at 20-30 s pauses.
-- **Full album at the default pause**: about 22 hours (2,482 x 25 s mean pause = 17 h, ~5 s
+- **Measured full-album rate** (backfill, 2026-11-10/11): ~33 s per item mean over the first
+  150 (photos 4-7 s, then the 20-30 s pause; 0.7 GB videos ~60 s), so ~23 h for 2,482.
+  Collecting from the stage alongside the download is safe (`.part` files are skipped).
+- **Full album at the default pause** (estimate from the test run): about 22 hours (2,482 x 25 s mean pause = 17 h, ~5 s
   handling per item = 3.5 h, video transfer 1-2.5 h for an estimated 75-140 GB of video).
   Stage plus library copies need about twice that on E: until the stage is retired
   (`photo_collector.py retire "<stage>" --library ... --exclude _gphotos --delete`).
