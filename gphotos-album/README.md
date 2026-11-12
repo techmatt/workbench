@@ -28,8 +28,9 @@ uv run gphotos_album.py reconcile --stage "%STAGE%" --library "E:\Kids Photos"
   URLs of known ones; items gone from the album are marked `removed_from_album`, never deleted.
 - **download** fetches items not yet downloaded, in album order (newest first), one at a time,
   `--pause` + up to `--jitter` seconds apart. Re-runs and top-ups fetch only what's missing. An
-  item that fails is retried by the next run, up to `--max-attempts`; three failures in a row
-  stop the run (throttled, expired URLs: run `list` again, then `download`).
+  item that fails is retried by the next run, up to `--max-attempts`, after every never-tried
+  item (so a few items that always fail can't starve the rest); three failures in a row stop
+  the run (throttled, expired URLs: run `list` again, then `download`).
 - **collect** (photo-collector) copies what the library lacks, by exact bytes, dated and named
   by its usual rules. It accepts a source under `<library>\stage\`. Pass `--exclude _gphotos`.
 - **reconcile** marks each downloaded item `in-library` with its library path (by SHA-256),
@@ -44,7 +45,7 @@ uv run gphotos_album.py reconcile --stage "%STAGE%" --library "E:\Kids Photos"
   `_gphotos\backfill-done.txt` (counts and what still failed) at the end. Start it detached with
   output to a log; it takes most of a day for a 2,500-item album. `--max-items N` makes it a
   chunk: the main pass stops after N new downloads, and the retry pass covers only items this
-  run tried (the album is being backfilled in ~630-item chunks so a restart costs little).
+  run tried.
 - **login** (`--profile DIR`) opens a headed Chrome on a persistent profile to sign in once;
   `list`/`download` with the same `--profile` then run signed in. Not needed so far.
 
@@ -94,35 +95,23 @@ owners by id) and `items` by item id: `owner`, `kind` (photo, video, motion-phot
 - **"Julia and Elizabeth"** (2026-11-10): 2,482 items from 10 contributors (Daiany Silva
   1,160, Matthew Fisher 744, Spaz Monkey 299, then 89 or fewer each), 1,996 photos, 178 motion
   photos, 308 videos (3.2 hours of footage, longest 9.8 min; 24 in 4K), taken 2025-08-01 to
-  2026-11-08. Stage `E:\Kids Photos\stage\julia-and-elizabeth`.
-- **Test run, 2026-11-10 9:03pm**: the 10 newest items plus one Live Photo and one 4K video:
-  13 files, 230 MB, every one placed by collect (`_metadata\runs\20261110-211636-collect.txt`),
-  full resolution with EXIF and GPS. Photos took 5-8 s each (page load included), a 30 s 4K
-  video (201 MB) 18 s; a probe pulled a 54 s 1080p `.MOV` of 675 MB in 25 s (~27 MB/s).
-  No throttling seen at 20-30 s pauses.
-- **Measured full-album rate** (backfill, 2026-11-10/11): ~33 s per item mean over the first
-  150 (photos 4-7 s, then the 20-30 s pause; 0.7 GB videos ~60 s), so ~23 h for 2,482.
-  Collecting from the stage alongside the download is safe (`.part` files are skipped).
-- **Backfill chunks** (`backfill.py --max-items 630`, then collect, reconcile, `dedup.py`
-  scan/plan/apply `--unseal`, no pack). 009 got 587 before a restart killed it.
-  Chunk 1 (2026-11-11, 4:38-10:06am): album items 587-1216, 630 downloaded, 0 failures, 31 s
-  per item. 607 placed, 20 exact duplicates (bytes already in from `D:\Julia Photos`), 3 near
-  duplicates set aside. Dedup removed 63 in all, every one `re-encoded` with the same name, size
-  and capture time (thumbnail difference 0 for 54, at most 0.7): 60 `D:\Julia Photos` copies
-  (named `.HEIC` but JPEG bytes, sizes within 111 KB) in favour of the album's JPEG, 3 of the album's own. Collect plus reconcile plus dedup took about 5 min. Next chunk starts at item 1217.
-  Chunk 2 (2026-11-11, 10:12am-3:40pm): album items 1217-1849, `--max-items 633` (half of the
-  1,265 left, rounded up), 0 failures, 31 s per item, 6.5 GB. 167 placed, 408 exact duplicates
-  (372 of them Matthew Fisher's, all first collected from `D:\Julia Photos`; 47 Live clips too),
-  58 near duplicates set aside. Dedup removed 225, all `re-encoded`, same name, size and capture
-  time (difference 0 for 185, at most 0.56): 167 `D:\Julia Photos` copies in favour of the album,
-  58 album stills in favour of the `D:\Julia Photos` copy, 47 of them because that copy carries
-  a Live clip and the album's still doesn't. Post-download steps took about 2 min. Next chunk:
-  item 1850 on, 632 left (`--max-items 632`).
-  Run reconcile *after* `dedup.py apply`, so near duplicates get their outcome.
-- **Full album at the default pause** (estimate from the test run): about 22 hours (2,482 x 25 s mean pause = 17 h, ~5 s
-  handling per item = 3.5 h, video transfer 1-2.5 h for an estimated 75-140 GB of video).
-  Stage plus library copies need about twice that on E: until the stage is retired
-  (`photo_collector.py retire "<stage>" --library ... --exclude _gphotos --delete`).
-- The first collect of this stage also took in a failure screenshot (`.png`) from `_gphotos\`
-  as an undated photo; it was removed again
-  (`_metadata\runs\20261110-*-undo-screenshot.txt`), and failures are now saved as HTML.
+  2026-11-08. Stage `E:\Kids Photos\stage\julia-and-elizabeth`. Fully downloaded and collected
+  (2026-11-11): every item is `in-library` except 10 `failed` iPhone motion photos (below).
+- **iPhone motion photos whose clip won't come**: for 10 of this album's 178 motion photos,
+  `=dv` answers an HTTP error on every try, so the item stays `failed` although its still
+  downloaded and was collected (its `sha256` is in the library); only the Live clip is missing.
+  Signed in (`--profile`) is the untried route.
+- **Pace**: 31-35 s per item wall at the default pause (photos 4-8 s of handling including page
+  load, then the 20-30 s pause; a 0.7 GB video ~60 s; ~27 MB/s for video), so a 2,500-item
+  album takes about 22 h. No throttling seen signed out at that pace.
+- **Chunking**: `backfill.py --max-items N` (about 630 here) keeps a restart cheap; after each
+  chunk run collect, `dedup.py` scan/plan/apply `--unseal`, then reconcile. Run reconcile
+  *after* `dedup.py apply`, so near duplicates get their outcome. Collect plus dedup plus
+  reconcile takes a few minutes per chunk. Collecting from the stage alongside the download is
+  safe (`.part` files are skipped).
+- **Overlap with `D:\Julia Photos`**: many album items were already in the library from there,
+  either as the same bytes (`exact-duplicate`) or as a re-encoded copy (same name, size and
+  capture time; HEIC-named JPEG bytes) that dedup sets aside, keeping the album copy unless the
+  other carries a Live clip.
+- **Disk**: stage plus library copies need about twice the album's size on E: until the stage is
+  retired (`photo_collector.py retire "<stage>" --library ... --exclude _gphotos --delete`).

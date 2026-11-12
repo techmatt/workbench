@@ -1,0 +1,8 @@
+groups 330 removals 330
+   ('re-encoded', 'removed=other', 'kept=album') 265
+   ('re-encoded', 'removed=album', 'kept=other') 65
+flags {'stem same': 319, 'same size': 330, 'same date': 330, 'removed has live/motion': 0, 'kept has live/motion': 45}
+ext removed->kept {('.jpg', '.jpg'): 26, ('.heic', '.jpg'): 260, ('.jpg', '.heic'): 44}
+removed from volumes {'photos/2025-6': 65, 'photos/2025-3': 18, 'photos/2025-4': 247}
+evidence samples [('mad #; dims #x# / #x#; date #:#:# #:#:#|#:#:# #:#:# sub #|#; stem same', 319), ('mad #; dims #x# / #x#; date #:#:# #:#:#|#:#:# #:#:# sub #|#; stem differs', 11)]
+mad: zero 235 max 0.5

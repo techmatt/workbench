@@ -1,0 +1,77 @@
+ALBUM 2482 expected, 2482 listed, 2482 in manifest, 0 removed_from_album
+status: {'in-library': 2472, 'failed': 10}
+outcome: {'placed': 1626, 'near-duplicate': 126, 'exact-duplicate': 720, 'failed': 10}
+kinds: {'photo': 1996, 'motion-photo': 178, 'video': 308}
+GB downloaded: 30.02 + clips 0.59
+
+009 items 0-586: 587  status {'in-library': 587}
+   outcome {'placed': 587}  kinds {'photo': 472, 'motion-photo': 53, 'video': 62}
+   clip outcomes {'placed': 44}  attempts>1 1  GB 6.76  handling s mean 6.3
+010 items 587-1216: 630  status {'in-library': 630}
+   outcome {'placed': 607, 'near-duplicate': 3, 'exact-duplicate': 20}  kinds {'video': 71, 'photo': 536, 'motion-photo': 23}
+   clip outcomes {'placed': 23}  attempts>1 0  GB 5.4  handling s mean 6.2
+011 items 1217-1849: 633  status {'in-library': 633}
+   outcome {'placed': 167, 'exact-duplicate': 408, 'near-duplicate': 58}  kinds {'photo': 516, 'video': 70, 'motion-photo': 47}
+   clip outcomes {'exact-duplicate': 47}  attempts>1 0  GB 6.35  handling s mean 5.8
+012 items 1850-2481: 632  status {'in-library': 622, 'failed': 10}
+   outcome {'placed': 265, 'exact-duplicate': 292, 'near-duplicate': 65, 'failed': 10}  kinds {'photo': 472, 'video': 105, 'motion-photo': 55}
+   clip outcomes {'exact-duplicate': 45}  attempts>1 7  GB 11.51  handling s mean 7.0
+   NOT DONE AF1QipMWRzxe7hrgPuCTNTUbzr5HvEbkfMjXmeKQRC_u motion-photo Spaz Monkey attempts 3 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczN1nogNaEzHw0oscK7-pSleKM5HjvZdbecDFWQYMS9oyQPx3SxqNfLYVYgmWZlaeIvrp9FJbJfxVuH47ragAeldhHHFMIY3UnY8p8aUGNQ_FUpLJ0s=dv
+   NOT DONE AF1QipPNHaiOxpWKSuj9dafyCS1xYvMQFa3KLDwFzD_w motion-photo Daiany Silva attempts 3 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczPaiduUKKJwQfcP9362qT3H-jd8a7i8hwN5G3T9TKT0y7sh73xKvB2ddgOu6Qyutw3WsZ3PXYLwzXShdg0pzk2YUXUe5LRwt0uLj8U9kDDfZu9zSNqF=dv
+   NOT DONE AF1QipP4lb4OCZaAfOGCJ7rt_OxwGOtJZ_H86-BrWW26 motion-photo Daiany Silva attempts 2 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczMGfBGZNeLTQA9guClC9dK7mdxLPFSD2jiQ9ug7q_ebH8S1Gk8VBBHrS7Y9hJwKSKOUMZswTxZisy96P-mIhItjSSCAlb296YnvPv0hFUzcr6sOsyRN=dv
+   NOT DONE AF1QipN6QcaE6xxqwBhDJ7qvdrsDghbYtEiOWBF5vnTJ motion-photo Daiany Silva attempts 2 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczOTyPLjQfIjwSj0vhNUMLAvt1QwRTC-IqJQcPvJfsdYwH_h7_uEWoxQbHOozbxKhhtdZ42eWHECRsJqK6L-TzIwzNiVup-mycpFCZaH9Kug-EixGMZY=dv
+   NOT DONE AF1QipO3109JbMb9_LkMr21CrBiRqObjizru7xmsBN4D motion-photo Daiany Silva attempts 2 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczPGKWXZgH-z8C_jaKa27xbEyvUWOaB18sNgLkiiKPiYy3ix5qykaoqBzEsynXZeHH77NklArYMxe6gamaNYBAQvqG8PSLmzeBOXt8paYbvx1MB6BpfM=dv
+   NOT DONE AF1QipO2pp8tdh7i8VyqW3xUABAvG_G9YqQRjUwbhKlV motion-photo Daiany Silva attempts 1 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczOLsriKisKKl9PaiJdo0CMvFkSvynDjLCQgYdCh1XQjmUhkaqsjKbeLGh3m_ND5BPG5HtcnS0qQFRRMfQT3M66DS6KF5WSxYtsoZmrfSSVsP5-d9CY8=dv
+   NOT DONE AF1QipP-fw1WbF0FRa1tdZtVdb7XBJGOkVyZijW0jc6x motion-photo Daiany Silva attempts 1 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczP5X6jlQD1sAJ-7CDbzGqGf87mXAZiMF8WXxBRLxBLBZmESPdu1Uc6-NbIT5epDCDoR_sJjkNXaS1BspfPvV5Ei4LsoglWKu4NWug6NSzsQhoCE8VVC=dv
+   NOT DONE AF1QipPq2lWZqTgTVPPHwjn8PeWQsnFEH256aHGhimhT motion-photo Daiany Silva attempts 1 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczPNNNO0GjqCt_Y4nJ0EhwIB_pmyWhq0LjG1l5kTUnl6xu2uOIy96Tpamlq41pXQBQLTsOkyG5B-M-m4Y2fTYNi2Av2oxd8OZtm0iiLgL21IL26Gx_Ty=dv
+   NOT DONE AF1QipOgVlV6bne10OjEHQswk2ktCCu4Nf4z-fLMcVud motion-photo Daiany Silva attempts 2 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczPuSwRTD7xSpG5Hb9Jwfy3twKzIDmMiiZQCXf3K8Zs_JOtq5JIhYOIyySIrGU6M25deWjDoFaOy3_9PQUOUx73u9HUPGnHk2byFC_uCFsMCDr0-Q17E=dv
+   NOT DONE AF1QipOOC46K_CP21YIIUu016TWZ0M8KjUJS8vuQlVrh motion-photo Daiany Silva attempts 2 Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://lh3.googleusercontent.com/pw/AP1GczNO71siZWf9Zqo0vAfjNCi-hpUXUM7BlQaCV42MVYYQsgxH0i48ty5P5-UKJoaWl0WcuLyRyFdWH0iWckV-xx4fvHd0kTqkAcvgNfQKenbRmmdaKtdI=dv
+
+dedup 009 runs ['20261110-220129']: removed 167  classes {'re-encoded': 97, 'resized': 35, 'same pixels': 29, 'video re-encoded': 6}
+   removed/kept side {('other', 'other'): 167}
+dedup 010 runs ['20261111-101055']: removed 63  classes {'re-encoded': 63}
+   removed/kept side {('other', 'album'): 60, ('album', 'other'): 2, ('album', 'album'): 1}
+dedup 011 runs ['20261111-154212']: removed 225  classes {'re-encoded': 225}
+   removed/kept side {('other', 'album'): 167, ('album', 'other'): 58}
+dedup 012 runs ['20261111-215014']: removed 330  classes {'re-encoded': 330}
+   removed/kept side {('album', 'other'): 65, ('other', 'album'): 265}
+
+volumes: 45 folders, 26 sealed, 19 unsealed:
+   photos/2022 (was sealed, unsealed by dedup 20261110-220129) 102 files
+   photos/2023 (was sealed, unsealed by dedup 20261110-220129) 569 files
+   photos/2024 (was sealed, unsealed by dedup 20261110-220129) 845 files
+   photos/2024-2 (was sealed, unsealed by dedup 20261110-220129) 421 files
+   photos/2025 (was sealed, unsealed by dedup 20261110-220129) 450 files
+   photos/2025-2 (was sealed, unsealed by dedup 20261110-220129) 463 files
+   photos/2025-3 (was sealed, unsealed by dedup 20261110-220129) 570 files
+   photos/2025-4 (was sealed, unsealed by dedup 20261110-220129) 382 files
+   photos/2025-5 (was sealed, unsealed by dedup 20261111-154212) 115 files
+   photos/2025-6 (never sealed) 317 files
+   photos/2026 (was sealed, unsealed by dedup 20261111-101055) 251 files
+   photos/2026-2 (never sealed) 883 files
+   photos/2026-3 (never sealed) 295 files
+   photos/undated (was sealed, unsealed by dedup 20261110-220129) 161 files
+   videos/2025 (was sealed, unsealed by dedup 20261110-220129) 74 files
+   videos/2026-2 (never sealed) 52 files
+   videos/2026-3 (never sealed) 54 files
+   videos/undated-2 (never sealed) 4 files
+   live/2026 (never sealed) 67 files
+videos/large: 388 files, 18 not yet upload-listed 5.55 GB
+library files 7982 set_aside 785
+
+failed items: is the still in the library?
+  1961 Spaz Monkey/IMG_2010.jpg attempts 3: photos/2025-6/2025-10-26_095551_IMG_2010.jpg
+  1981 Daiany Silva/IMG_0112.jpg attempts 3: photos/2025-6/2025-10-24_120251_IMG_0112.jpg
+  2153 Daiany Silva/IMG_9886.jpg attempts 2: photos/2025-6/2025-10-13_123429_IMG_9886.jpg
+  2154 Daiany Silva/IMG_9885.jpg attempts 2: photos/2025-6/2025-10-13_122953_IMG_9885.jpg
+  2158 Daiany Silva/IMG_9882.jpg attempts 2: photos/2025-6/2025-10-13_111533_IMG_9882.jpg
+  2176 Daiany Silva/IMG_9849.jpg attempts 1: photos/2025-6/2025-10-10_130334_IMG_9849.jpg
+  2177 Daiany Silva/IMG_9850.jpg attempts 1: photos/2025-6/2025-10-10_130334_IMG_9850.jpg
+  2178 Daiany Silva/IMG_9843.jpg attempts 1: photos/2025-6/2025-10-10_130316_IMG_9843_aHGhimhT.jpg
+  2179 Daiany Silva/IMG_9840.jpg attempts 2: photos/2025-6/2025-10-10_130314_IMG_9840.jpg
+  2183 Daiany Silva/IMG_9836.jpg attempts 2: photos/2025-6/2025-10-10_114758_IMG_9836_8vuQlVrh.jpg
+
+012 exact-duplicate first source: {'Julia Photos': 292}
+012 exact-duplicate by owner/kind: {('Ronan Beltracchi', 'photo'): 1, ('Nik Heath', 'photo'): 23, ('Shannon Thomson', 'video'): 3, ('Daiany Silva', 'video'): 59, ('Ronan Beltracchi', 'video'): 5, ('Matthew Fisher', 'photo'): 128, ('Matthew Fisher', 'video'): 30, ('Daiany Silva', 'photo'): 34, ('Spaz Monkey', 'photo'): 1, ('Marie Chelberg', 'video'): 1, ('Jason Collins', 'video'): 7}
+012 placed by owner: {'Ronan Beltracchi': 14, 'Daiany Silva': 234, 'Spaz Monkey': 4, 'Jason Collins': 10, 'Marie Chelberg': 3}
+012 clip outcomes: {'exact-duplicate': 45}

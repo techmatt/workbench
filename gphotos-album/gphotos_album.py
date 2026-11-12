@@ -344,7 +344,9 @@ def cmd_download(args):
     todo = sorted((r for r in items.values()
                    if r["status"] not in DONE and not r.get("removed_from_album")
                    and r["attempts"] < args.max_attempts),
-                  key=lambda r: r["album_index"])
+                  # never-tried items first: failures retried ahead of them can hit
+                  # "3 failures in a row" and starve the rest of the album
+                  key=lambda r: (r["attempts"] > 0, r["album_index"]))
     if args.only:
         todo = [r for r in todo if r["id"] in args.only]
     if args.limit:
